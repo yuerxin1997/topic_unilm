@@ -26,6 +26,7 @@ from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 
 from nn.data_parallel import DataParallelImbalance
 import biunilm.seq2seq_loader as seq2seq_loader
+from biunilm.seq2seq_loader import smooth_curve
 import torch.distributed as dist
 
 from topic_model.gsm import GSM
@@ -349,6 +350,7 @@ def main():
 
     if args.fp16:
         unilm.half()
+        gsm.half()
         if args.fp32_embedding:
             unilm.bert.embeddings.word_embeddings.float()
             unilm.bert.embeddings.position_embeddings.float()
@@ -368,15 +370,18 @@ def main():
         gsm = DataParallelImbalance(gsm)
     # Prepare optimizer
     param_optimizer = list(unilm.named_parameters())
-    for name, parameters in unilm.named_parameters():
-        print(name, ':', parameters.size())
+    param_optimizer_topic = list(gsm.named_parameters())
+    # for name, parameters in param_optimizer:
+    #     print(name, ':', parameters.size())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
         {'params': [p for n, p in param_optimizer if not any(
-            nd in n for nd in no_decay)], 'weight_decay': 0.01},
+            nd in n for nd in no_decay)], 'weight_decay': 0.01, 'topic':False},
         {'params': [p for n, p in param_optimizer if any(
-            nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    ] #一部分是有weight的，一部分是没有weight_dacay的
+            nd in n for nd in no_decay)], 'weight_decay': 0.0, 'topic':False},        
+        {'params': [p for n, p in param_optimizer_topic], 'weight_decay': 0.0, 'lr':5e-5, 'topic':True}
+    ]
+    #一部分是有weight的，一部分是没有weight_dacay的
     if args.fp16:
         try:
             # from apex.optimizers import FP16_Optimizer
@@ -390,27 +395,23 @@ def main():
                               lr=args.learning_rate,
                               bias_correction=False,
                               max_grad_norm=1.0)
-        topic_optimizer = FusedAdam(gsm.parameters(),
-                        lr=args.learning_rate,
-                        bias_correction=False,
-                        max_grad_norm=1.0)
         if args.loss_scale == 0:
             optimizer = FP16_Optimizer_State(
                 optimizer, dynamic_loss_scale=True)
-            topic_optimizer = FP16_Optimizer_State(
-                topic_optimizer, dynamic_loss_scale=True)
+            # topic_optimizer = FP16_Optimizer_State(
+            #     topic_optimizer, dynamic_loss_scale=True)
         else:
             optimizer = FP16_Optimizer_State(
                 optimizer, static_loss_scale=args.loss_scale)
-            topic_optimizer = FP16_Optimizer_State(
-                topic_optimizer, dynamic_loss_scale=True)
+            # topic_optimizer = FP16_Optimizer_State(
+            #     topic_optimizer, static_loss_scale=args.loss_scale)
     else:
         optimizer = BertAdam(optimizer_grouped_parameters,
                              lr=args.learning_rate,
                              warmup=args.warmup_proportion,
                              t_total=t_total)
         topic_optimizer = torch.optim.Adam(gsm.parameters(),
-                        lr=args.learning_rate,)
+                        lr=5e-5)
     if recover_step:
         logger.info("***** Recover optimizer: %d *****", recover_step)
         optim_recover = torch.load(os.path.join(
@@ -459,9 +460,11 @@ def main():
                 else:#这里加了bows
                     input_ids, segment_ids, input_mask, mask_qkv, lm_label_ids, masked_pos, masked_weights, is_next, task_idx, bows= batch
                     oracle_pos, oracle_weights, oracle_labels = None, None, None   
-                p_x,mus,log_vars,theta,beta = gsm(bows)    
-                loss_tuple = unilm(input_ids, theta, beta,segment_ids, input_mask, lm_label_ids, is_next, masked_pos=masked_pos, masked_weights=masked_weights, task_idx=task_idx, masked_pos_2=oracle_pos, masked_weights_2=oracle_weights, masked_labels_2=oracle_labels, mask_qkv=mask_qkv)
-                masked_lm_loss, next_sentence_loss = loss_tuple
+                p_x,mus,log_vars,theta,beta = gsm(bows)   
+                topic_model_only = False 
+                if not topic_model_only:
+                    loss_tuple = unilm(input_ids, theta, beta,segment_ids, input_mask, lm_label_ids, is_next, masked_pos=masked_pos, masked_weights=masked_weights, task_idx=task_idx, masked_pos_2=oracle_pos, masked_weights_2=oracle_weights, masked_labels_2=oracle_labels, mask_qkv=mask_qkv)
+                    masked_lm_loss, next_sentence_loss = loss_tuple
 
                 ## topic loss 
                 logsoftmax = torch.log(p_x + 1e-10) 
@@ -473,38 +476,42 @@ def main():
                 loss_topic = rec_loss + kl_div 
                 if n_gpu > 1:    # mean() to average on multi-gpu.
                     loss_topic = loss_topic.mean()
-                    masked_lm_loss = masked_lm_loss.mean()
-                    next_sentence_loss = next_sentence_loss.mean()
-                loss_unilm = masked_lm_loss + next_sentence_loss
+                    if not topic_model_only:
+                        masked_lm_loss = masked_lm_loss.mean()
+                        next_sentence_loss = next_sentence_loss.mean()
+                if not topic_model_only:
+                    loss_unilm = masked_lm_loss + next_sentence_loss
 
                 # cal perplexity
                 word_count_list = []
                 loss_sum += loss_topic.item()
                 for bow in bows:
-                    word_num = len(torch.nonzero(bow))
+                    word_num = torch.sum(bow).cpu().numpy()
                     word_count_list.append(word_num)
                     word_count += word_num
+
                 word_count_np = np.array(word_count_list)
                 doc_count += len(bows)
                 ppx_sum += np.sum(np.true_divide(rec_loss_per,word_count_np))
                 topicloss_lst.append(loss_topic.item()/len(bows))
-                unilmloss_lst.append(loss_unilm.item())
+                if not topic_model_only:
+                    unilmloss_lst.append(loss_unilm.item())
                 #topic_loss end
-
-
                 # logging for each step (i.e., before normalization by args.gradient_accumulation_steps)
-                loss = loss_unilm + loss_topic
+                if topic_model_only:
+                    loss = loss_topic
+                else:
+                    loss = loss_unilm + loss_topic
                 # ensure that accumlated gradients are normalized
                 if args.gradient_accumulation_steps > 1: # =1
                     loss = loss / args.gradient_accumulation_steps
 
                 if args.fp16:
                     optimizer.backward(loss)
-                    topic_optimizer.backward(loss)
                     if amp_handle:
                         amp_handle._clear_cache()
                 else:
-                    loss.backward()
+                    loss.backward()  
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     lr_this_step = args.learning_rate * \
                         warmup_linear(global_step/t_total,
@@ -512,18 +519,20 @@ def main():
                     if args.fp16:
                         # modify learning rate with special warm up BERT uses
                         for param_group in optimizer.param_groups:
-                            param_group['lr'] = lr_this_step
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    topic_optimizer.step()
-                    topic_optimizer.zero_grad()
+                            if not param_group['topic']:
+                                param_group['lr'] = lr_this_step
+                    if not topic_model_only:
+                        optimizer.step()
+                        optimizer.zero_grad()
+                    # topic_optimizer.step()
+                    # topic_optimizer.zero_grad()
                     global_step += 1
                 iter_bar.set_description('Iter (loss_unilm=%5.3f),Iter (ppl=%5.3f)' % (loss_unilm.item(), np.sum(np.true_divide(rec_loss_per,word_count_np)) ))
             #Save a trained model
-            # unilmloss.append(sum(unilmloss_lst)/len(uni))
-            # topicloss.append(mean(topicloss_lst))
             ppx_word = np.exp(loss_sum / word_count)
             ppx_document = np.exp(ppx_sum / doc_count)
+            print("********")
+            print("word_count", word_count)
             print("ppx_word", ppx_word)
             print("ppx_document",ppx_document)            
             if (args.local_rank == -1 or torch.distributed.get_rank() == 0):
@@ -535,9 +544,9 @@ def main():
                 output_unilm_model_file = os.path.join(
                     args.output_dir, "unilm_{0}.{1}.bin".format(args.experiment_name,i_epoch))
                 torch.save(unilm_model_to_save.state_dict(), output_unilm_model_file)
-                output_optim_unilm_file = os.path.join(
-                    args.output_dir, "optim_unilm_{0}.{1}.bin".format(args.experiment_name,i_epoch))
-                torch.save(optimizer.state_dict(), output_optim_unilm_file)
+                # output_optim_unilm_file = os.path.join(
+                #     args.output_dir, "optim_unilm_{0}.{1}.bin".format(args.experiment_name,i_epoch))
+                # torch.save(optimizer.state_dict(), output_optim_unilm_file)
                 #save topic model
                 logger.info(
                     "** ** * Saving topic model and optimizer ** ** * ")
@@ -546,13 +555,15 @@ def main():
                 output_topic_model_file = os.path.join(
                     args.output_dir, "topic_{0}.{1}.ckpt".format(args.experiment_name, i_epoch))
                 torch.save(topic_model_to_save.state_dict(), output_topic_model_file)
-                output_optim_topic_file = os.path.join(
-                    args.output_dir, "optim_topic_{0}.{1}.bin".format(args.experiment_name,i_epoch))
-                torch.save(topic_optimizer.state_dict(), output_optim_topic_file)
+                # output_optim_topic_file = os.path.join(
+                #     args.output_dir, "optim_topic_{0}.{1}.bin".format(args.experiment_name,i_epoch))
+                # torch.save(topic_optimizer.state_dict(), output_optim_topic_file)
 
                 logger.info("***** CUDA.empty_cache() *****")
                 torch.cuda.empty_cache()
-        plt.plot(range(len(topicloss_lst)), topicloss_lst)
+        smth_pts = smooth_curve(topicloss_lst)
+        # plt.plot(range(len(topicloss_lst)), topicloss_lst)
+        plt.plot(range(len(smth_pts)),smth_pts)
         plt.xlabel('epochs')
         plt.title('Train Loss')
         plt.savefig('topic_loss.png')  

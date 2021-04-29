@@ -18,7 +18,15 @@ from gensim.corpora import Dictionary
 #    the sentence boundaries for the "next sentence prediction" task).
 # 2. Blank lines between documents. Document boundaries are needed
 #    so that the "next sentence prediction" task doesn't span between documents.
-
+def smooth_curve(points, factor=0.9):
+    smoothed_points = []
+    for pt in points:
+        if smoothed_points:
+            prev = smoothed_points[-1]
+            smoothed_points.append(prev*factor+pt*(1-factor))
+        else:
+            smoothed_points.append(pt)
+    return smoothed_points
 
 def truncate_tokens_pair(tokens_a, tokens_b, max_len, max_len_a=0, max_len_b=0, trunc_seg=None, always_truncate_tail=False):
     num_truncated_a = [0, 0]

@@ -5,7 +5,16 @@ import numpy as np
 import torch
 import torch.utils.data
 
-
+def smooth_curve(points, factor=0.9):
+    smoothed_points = []
+    for pt in points:
+        if smoothed_points:
+            prev = smoothed_points[-1]
+            smoothed_points.append(prev*factor+pt*(1-factor))
+        else:
+            smoothed_points.append(pt)
+    return smoothed_points
+    
 def get_random_word(vocab_words):
     i = randint(0, len(vocab_words)-1)
     return vocab_words[i]
