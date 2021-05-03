@@ -244,7 +244,6 @@ class BertEmbeddings(nn.Module):
             num_pos = position_embeddings.size(1)
             position_embeddings = position_embeddings.view(
                 num_batch, num_pos, self.num_pos_emb, -1)[torch.arange(0, num_batch).long(), :, task_idx, :]
-
         embeddings = words_embeddings + position_embeddings + token_type_embeddings
         if self.fp32_embedding:
             embeddings = embeddings.half()
@@ -281,6 +280,14 @@ class BertSelfAttention(nn.Module):
         self.w_q = nn.Linear(config.hidden_size, config.hidden_size)   
         self.W_k = nn.Linear(config.hidden_size, config.hidden_size)   
         self.W_v = nn.Linear(config.hidden_size, config.hidden_size)
+
+        self.WQa = nn.Linear(config.hidden_size, config.hidden_size)
+        self.WQc = nn.Linear(config.hidden_size, config.hidden_size)   
+        self.WKa = nn.Linear(config.hidden_size, config.hidden_size)
+        self.WKc = nn.Linear(config.hidden_size, config.hidden_size)   
+        self.WVa = nn.Linear(config.hidden_size, config.hidden_size)
+        self.WVc = nn.Linear(config.hidden_size, config.hidden_size)   
+
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
@@ -323,29 +330,70 @@ class BertSelfAttention(nn.Module):
         # (batch, head, pos, head_hid)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, hidden_states,  theta, beta, attention_mask, history_states=None, mask_qkv=None, seg_ids=None):
+    def forward(self, hidden_states,  theta, beta, topic_embedding, topic_mode, attention_mask, history_states=None, mask_qkv=None, seg_ids=None):
         #hideen_states = [batch,192,768]
         #theta = [batch,K] topic-document distribution
         #beta = [K,2000] topic-words distribution
-        # topic_attention 
-        fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
-        fi = self.LayerNorm(fi)
-        Q = self.w_q(hidden_states) #[batch,192,768] = [batch,192,768] * [768,768]
-        K = self.W_k(fi) #[k,768] = [k,768] * [768,768]
-        V = self.W_v(K) #[k,768] = [k,768] * [768,768]
+        #topic_embedding = [K, 768]
+        if topic_mode == 1:
+            ##topic_attention 1
+            fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
+            # fi = topic_embedding
+            fi = self.LayerNorm(fi)
+            Q = self.w_q(hidden_states) #[batch,192,768] = [batch,192,768] * [768,768]
+            K = self.W_k(fi) #[k,768] = [k,768] * [768,768]
+            V = self.W_v(K) #[k,768] = [k,768] * [768,768]
 
+            K = torch.unsqueeze(K,0) # [1, k, 768]
+            theta = torch.unsqueeze(theta,1) # [batch,1,k]
+            topic_attention_scores = torch.matmul(
+                Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2) * theta) #  后面= [batch,768,k] = [1,768,k]*[batch,1,k]  Q*后面=[batch,192,k=[batch,192,768]*[batch,768,k]  
+                
+            # topic_attention_scores = torch.matmul(
+            #      Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2))   # Q = [batch,192,768] * [768,k] = [batch,192,k]    
+            topic_attention_probs = nn.Softmax(dim=-1)(topic_attention_scores) #[batch,192,k]
+            topic_attention_probs = self.dropout(topic_attention_probs)
+            topic_context_layer = torch.matmul(topic_attention_probs, V) # [batch,192,768] = [batch,192,k] * [k,768]
+            topic_context_layer_2 = None
+        if topic_mode == 2:
+            ##topic_attention 2
+            # print("torch.matmul(theta, topic_embedding)", torch.matmul(theta, topic_embedding).size(),theta.size()[0], topic_embedding.size()[1], topic_embedding.size()[1])
+            WQ_middle = torch.unsqueeze(torch.matmul(theta, topic_embedding), 2).expand(theta.size()[0], topic_embedding.size()[1], topic_embedding.size()[1]) #[batch,E,E]
+            # print("Q_middle", WQ_middle.size(),WQ_middle[0])
+            WQ_head = self.WQa(WQ_middle) #(batch,E,E)
+            WQ = self.WQa(WQ_head) #(batch,E,E)
+            # print("WQ",WQ.size())
 
-        K = torch.unsqueeze(K,0) # [1, k, 768]
-        theta = torch.unsqueeze(theta,1) # [batch,1,k]
-        topic_attention_scores = torch.matmul(
-            Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2) * theta) #  后面= [batch,768,k] = [1,768,k]*[batch,1,k]  Q*后面=[batch,192,k]=[batch,192,768]*[batch,768,k]  
-        # topic_attention_scores = torch.matmul(
-        #      Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2))        
-        topic_attention_probs = nn.Softmax(dim=-1)(topic_attention_scores) #[batch,192,k]
-        topic_attention_probs = self.dropout(topic_attention_probs)
-        topic_context_layer = torch.matmul(topic_attention_probs, V) # [batch,192,768] = [batch,192,k] * [k,768]
-
-        #self_attention
+            # WK_middle = torch.unsqueeze(torch.matmul(theta, topic_embedding), 2).expand(theta.size()[0], topic_embedding.size()[1], topic_embedding.size()[1]) #[batch,E,E]
+            # print("K_middle", WK_middle.size(),WK_middle[0])
+            WK_head = self.WKa(WQ_middle) #(batch,E,E)
+            WK = self.WKa(WK_head) #(batch,E,E)
+            WV_head = self.WVa(WQ_middle) #(batch,E,E)
+            WV = self.WVa(WV_head) #(batch,E,E)
+            if history_states is None: #都是none
+                topic_mixed_query_layer = torch.matmul(hidden_states,WQ) #mixed_query_layer = [batch,192,768] = [batch,192,768] * [batch,768,768]
+                topic_mixed_key_layer = torch.matmul(hidden_states,WK)
+                topic_mixed_value_layer = torch.matmul(hidden_states,WV)
+            else:
+                x_states = torch.cat((history_states, hidden_states), dim=1)
+                topic_mixed_query_layer = torch.matmul(hidden_states,WQ) #mixed_query_layer = [batch,192,768] = [batch,192,768] * [batch,768,768]
+                topic_mixed_key_layer = torch.matmul(x_states,WK)
+                topic_mixed_value_layer = torch.matmul(x_states,WV)      
+            topic_query_layer = self.transpose_for_scores(topic_mixed_query_layer, mask_qkv) #[batch,12,192,64] 其中12是attention_head_num, 64是attention_hidden_state
+            topic_key_layer = self.transpose_for_scores(topic_mixed_key_layer, mask_qkv)
+            topic_value_layer = self.transpose_for_scores(topic_mixed_value_layer, mask_qkv)
+            topic_attention_scores = torch.matmul(
+                topic_query_layer / math.sqrt(self.attention_head_size), topic_key_layer.transpose(-1, -2)) #[batch,12,192,192] =[batch,12,192,64] * [batch,12,64,192]
+            topic_attention_scores = topic_attention_scores + attention_mask #attention_mask 就是把所有padding的部分变成-10000，有字的地方变成0
+            topic_attention_probs = nn.Softmax(dim=-1)(topic_attention_scores)
+            topic_attention_probs = self.dropout(topic_attention_probs)
+            topic_context_layer_2 = torch.matmul(topic_attention_probs, topic_value_layer) # [batch,12,192,64] = [batch,12,192,192] * [batch,12,192,64]
+            topic_context_layer_2 = topic_context_layer_2.permute(0, 2, 1, 3).contiguous()
+            topic_new_context_layer_shape = topic_context_layer_2.size()[
+                :-2] + (self.all_head_size,) #就是看输出要多少size [batch,192,768]
+            topic_context_layer_2 = topic_context_layer_2.view(*topic_new_context_layer_shape) #按size输出        
+            topic_context_layer = None
+        ##self_attention
         if history_states is None: #都是none
             mixed_query_layer = self.query(hidden_states) #mixed_query_layer = [batch,192,768] = [batch,192,768] * [768,768]
             mixed_key_layer = self.key(hidden_states)
@@ -370,7 +418,7 @@ class BertSelfAttention(nn.Module):
         new_context_layer_shape = context_layer.size()[
             :-2] + (self.all_head_size,) #就是看输出要多少size [batch,192,768]
         context_layer = context_layer.view(*new_context_layer_shape) #按size输出
-        return context_layer, topic_context_layer
+        return context_layer, topic_context_layer, topic_context_layer_2
 
 
 class BertSelfOutput(nn.Module):
@@ -380,11 +428,15 @@ class BertSelfOutput(nn.Module):
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-5)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, hidden_states, input_tensor, self_topic_output, layer_id):
+    def forward(self, hidden_states, input_tensor, self_topic_output, self_topic_output_2, layer_id, topic_mode):
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
+
         if layer_id==11:
-            hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output)
+            if topic_mode == 1:
+                hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output)
+            else:
+                hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output_2)
         else:
             hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
@@ -396,10 +448,10 @@ class BertAttention(nn.Module):
         self.self = BertSelfAttention(config)
         self.output = BertSelfOutput(config)
 
-    def forward(self, input_tensor, theta, beta, layer_id, attention_mask, history_states=None, mask_qkv=None, seg_ids=None):
-        self_output, self_topic_output = self.self(
-            input_tensor, theta, beta, attention_mask, history_states=history_states, mask_qkv=mask_qkv, seg_ids=seg_ids)
-        attention_output = self.output(self_output, input_tensor, self_topic_output, layer_id)
+    def forward(self, input_tensor, theta, beta, topic_embedding, layer_id, topic_mode, attention_mask, history_states=None, mask_qkv=None, seg_ids=None):
+        self_output, self_topic_output, self_topic_output_2 = self.self(
+            input_tensor, theta, beta, topic_embedding, topic_mode, attention_mask, history_states=history_states, mask_qkv=mask_qkv, seg_ids=seg_ids)
+        attention_output = self.output(self_output, input_tensor, self_topic_output, self_topic_output_2, layer_id, topic_mode)
         return attention_output
 
 
@@ -468,9 +520,9 @@ class BertLayer(nn.Module):
             self.intermediate = BertIntermediate(config)
             self.output = BertOutput(config)
 
-    def forward(self, hidden_states, theta, beta, layer_id, attention_mask,  history_states=None, mask_qkv=None, seg_ids=None):
+    def forward(self, hidden_states, theta, beta, topic_embedding, layer_id, topic_mode, attention_mask,  history_states=None, mask_qkv=None, seg_ids=None):
         attention_output = self.attention(
-            hidden_states, theta, beta, layer_id, attention_mask, history_states=history_states, mask_qkv=mask_qkv, seg_ids=seg_ids)
+            hidden_states, theta, beta, topic_embedding, layer_id, topic_mode, attention_mask, history_states=history_states, mask_qkv=mask_qkv, seg_ids=seg_ids)
         if self.ffn_type: #0
             layer_output = self.ffn(attention_output)
         else:
@@ -486,7 +538,7 @@ class BertEncoder(nn.Module):
         self.layer = nn.ModuleList([copy.deepcopy(layer)
                                     for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, theta, beta, attention_mask, output_all_encoded_layers=True, prev_embedding=None, prev_encoded_layers=None, mask_qkv=None, seg_ids=None):
+    def forward(self, hidden_states, theta, beta, topic_embedding, topic_mode, attention_mask, output_all_encoded_layers=True, prev_embedding=None, prev_encoded_layers=None, mask_qkv=None, seg_ids=None):
         # history embedding and encoded layer must be simultanously given
         assert (prev_embedding is None) == (prev_encoded_layers is None)
 
@@ -496,7 +548,7 @@ class BertEncoder(nn.Module):
             history_states = prev_embedding
             for i, layer_module in enumerate(self.layer):
                 hidden_states = layer_module(
-                    hidden_states, theta, beta, i, attention_mask, history_states=history_states, mask_qkv=mask_qkv, seg_ids=seg_ids)
+                    hidden_states, theta, beta, topic_embedding, i, topic_mode, attention_mask, history_states=history_states, mask_qkv=mask_qkv, seg_ids=seg_ids)
                 if output_all_encoded_layers:
                     all_encoder_layers.append(hidden_states)
                 if prev_encoded_layers is not None:
@@ -505,7 +557,7 @@ class BertEncoder(nn.Module):
         else: #train用这个
             for i, layer_module in enumerate(self.layer):
                 hidden_states = layer_module(
-                    hidden_states, theta, beta, i, attention_mask, mask_qkv=mask_qkv, seg_ids=seg_ids)
+                    hidden_states, theta, beta, topic_embedding, i, topic_mode, attention_mask, mask_qkv=mask_qkv, seg_ids=seg_ids)
                 if output_all_encoded_layers:
                     all_encoder_layers.append(hidden_states)
             
@@ -999,7 +1051,7 @@ class BertForPreTrainingLossMask(PreTrainedBertModel):
         self.apply(self.init_bert_weights)
         self.bert.rescale_some_parameters()
 
-    def forward(self, input_ids, theta, beta, token_type_ids=None, attention_mask=None, masked_lm_labels=None,
+    def forward(self, input_ids, theta, beta,topic_embedding,topic_mode, token_type_ids=None, attention_mask=None, masked_lm_labels=None,
                 next_sentence_label=None, masked_pos=None, masked_weights=None, task_idx=None, pair_x=None,
                 pair_x_mask=None, pair_y=None, pair_y_mask=None, pair_r=None, pair_pos_neg_mask=None,
                 pair_loss_mask=None, masked_pos_2=None, masked_weights_2=None, masked_labels_2=None,
@@ -1058,7 +1110,7 @@ class BertForPreTrainingLossMask(PreTrainedBertModel):
             attention_mask = attention_mask.type_as(input_ids)
 
         sequence_output, pooled_output = self.bert(
-            input_ids, theta, beta, token_type_ids, attention_mask, output_all_encoded_layers=False, mask_qkv=mask_qkv, task_idx=task_idx)
+            input_ids, theta, beta, topic_embedding, topic_mode, token_type_ids, attention_mask, output_all_encoded_layers=False, mask_qkv=mask_qkv, task_idx=task_idx)
         def gather_seq_out_by_pos(seq, pos):
             return torch.gather(seq, 1, pos.unsqueeze(2).expand(-1, -1, seq.size(-1)))
 
@@ -1215,7 +1267,7 @@ class BertModel(PreTrainedBertModel):
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
         return extended_attention_mask
 
-    def forward(self, input_ids, theta, beta, token_type_ids=None, attention_mask=None, output_all_encoded_layers=True, mask_qkv=None, task_idx=None):
+    def forward(self, input_ids, theta, beta, topic_embedding, topic_mode, token_type_ids=None, attention_mask=None, output_all_encoded_layers=True, mask_qkv=None, task_idx=None):
         # input_ids=[batch_size,192] 
         # token_type_ids=[batch_size,192] 
         # attention_mask = [batch_size,192,192] 在有字的位置上是1 
@@ -1227,7 +1279,7 @@ class BertModel(PreTrainedBertModel):
             input_ids, token_type_ids, attention_mask) #[bath,1,192,192] 所有的1变0.所有的0变-10000
         embedding_output = self.embeddings(
             input_ids, token_type_ids, task_idx=task_idx) # [16,192,768]
-        encoded_layers = self.encoder(embedding_output, theta, beta, extended_attention_mask,
+        encoded_layers = self.encoder(embedding_output, theta, beta, topic_embedding, topic_mode, extended_attention_mask,
                                       output_all_encoded_layers=True, mask_qkv=mask_qkv, seg_ids=token_type_ids) #是个list，每个元素是每一层的输出 = [batch,192,768] 
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
@@ -1240,13 +1292,13 @@ class BertModelIncr(BertModel):
     def __init__(self, config):
         super(BertModelIncr, self).__init__(config)
 
-    def forward(self, input_ids, theta, beta, token_type_ids, position_ids, attention_mask, output_all_encoded_layers=True, prev_embedding=None,
+    def forward(self, input_ids, theta, beta, topic_embedding, topic_mode, token_type_ids, position_ids, attention_mask, output_all_encoded_layers=True, prev_embedding=None,
                 prev_encoded_layers=None, mask_qkv=None, task_idx=None):
         extended_attention_mask = self.get_extended_attention_mask(
             input_ids, token_type_ids, attention_mask)
         embedding_output = self.embeddings(
             input_ids, token_type_ids, position_ids, task_idx=task_idx)
-        encoded_layers = self.encoder(embedding_output, theta, beta,
+        encoded_layers = self.encoder(embedding_output, theta, beta, topic_embedding, topic_mode, 
                                       extended_attention_mask,
                                       output_all_encoded_layers=output_all_encoded_layers,
                                       prev_embedding=prev_embedding,
@@ -1422,9 +1474,9 @@ class BertForSeq2SeqDecoder(PreTrainedBertModel):
         self.mode = mode
         self.pos_shift = pos_shift
 
-    def forward(self, input_ids, theta, beta, token_type_ids, position_ids, attention_mask, task_idx=None, mask_qkv=None):
+    def forward(self, input_ids, theta, beta, topic_embedding, topic_mode, token_type_ids, position_ids, attention_mask, task_idx=None, mask_qkv=None):
         if self.search_beam_size > 1:
-            return self.beam_search(input_ids, theta, beta, token_type_ids, position_ids, attention_mask, task_idx=task_idx, mask_qkv=mask_qkv)
+            return self.beam_search(input_ids, theta, beta, topic_embedding, topic_mode, token_type_ids, position_ids, attention_mask, task_idx=task_idx, mask_qkv=mask_qkv)
 
         input_shape = list(input_ids.size())
         batch_size = input_shape[0]
@@ -1460,7 +1512,7 @@ class BertForSeq2SeqDecoder(PreTrainedBertModel):
                                                  start_pos:next_pos+1, :next_pos+1]
             curr_position_ids = position_ids[:, start_pos:next_pos+1]
             new_embedding, new_encoded_layers, _ = \
-                self.bert(x_input_ids, theta, beta, curr_token_type_ids, curr_position_ids, curr_attention_mask,
+                self.bert(x_input_ids, theta, beta, topic_embedding, topic_mode, curr_token_type_ids, curr_position_ids, curr_attention_mask,
                           output_all_encoded_layers=True, prev_embedding=prev_embedding, prev_encoded_layers=prev_encoded_layers, mask_qkv=mask_qkv)
 
             last_hidden = new_encoded_layers[-1][:, -1:, :]
@@ -1500,7 +1552,7 @@ class BertForSeq2SeqDecoder(PreTrainedBertModel):
 
         return torch.cat(output_ids, dim=1)
 
-    def beam_search(self, input_ids, theta, beta, token_type_ids, position_ids, attention_mask, task_idx=None, mask_qkv=None):
+    def beam_search(self, input_ids, theta, beta, topic_embedding, topic_mode, token_type_ids, position_ids, attention_mask, task_idx=None, mask_qkv=None):
         # print("input_ids.size()", input_ids.size())
         # print("token_type_ids.size()", token_type_ids.size())
         # print("position_ids.size()", position_ids[0],position_ids[10], position_ids.size())
@@ -1562,7 +1614,7 @@ class BertForSeq2SeqDecoder(PreTrainedBertModel):
             # print("curr_attention_mask", curr_attention_mask.size(), curr_attention_mask)
             curr_position_ids = position_ids[:, start_pos:next_pos + 1] #[64,122+1]
             new_embedding, new_encoded_layers, _ = \
-                self.bert(x_input_ids, theta, beta, curr_token_type_ids, curr_position_ids, curr_attention_mask,
+                self.bert(x_input_ids, theta, beta, topic_embedding, topic_mode, curr_token_type_ids, curr_position_ids, curr_attention_mask,
                           output_all_encoded_layers=True, prev_embedding=prev_embedding, prev_encoded_layers=prev_encoded_layers, mask_qkv=mask_qkv)
             # new_embedding = [64, 122, 768]
             # new_encoded_layers = list 长度12 每个是[64,122,768]

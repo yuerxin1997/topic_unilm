@@ -66,8 +66,6 @@ def main():
                         help="The input data file name.")
     parser.add_argument("--tgt_file", default=None, type=str,
                         help="The output data file name.")
-    parser.add_argument("--experiment_name", default=None, type=str,
-                        help="The output data file name.")
     parser.add_argument("--bert_model", default=None, type=str, required=True,
                         help="Bert pre-trained model selected in the list: bert-base-uncased, "
                              "bert-large-uncased, bert-base-cased, bert-base-multilingual, bert-base-chinese.")
@@ -92,7 +90,10 @@ def main():
                         default=None,
                         type=str,
                         help="The file of pretraining optimizer.")
-
+    parser.add_argument("--topic_mode",
+                        default=1,
+                        type=int,
+                        help="The file of pretraining optimizer.")
     # Other parameters
     parser.add_argument("--max_seq_length",
                         default=192,
@@ -460,10 +461,10 @@ def main():
                 else:#这里加了bows
                     input_ids, segment_ids, input_mask, mask_qkv, lm_label_ids, masked_pos, masked_weights, is_next, task_idx, bows= batch
                     oracle_pos, oracle_weights, oracle_labels = None, None, None   
-                p_x,mus,log_vars,theta,beta = gsm(bows)   
+                p_x,mus,log_vars,theta,beta,topic_embedding = gsm(bows)   
                 topic_model_only = False 
                 if not topic_model_only:
-                    loss_tuple = unilm(input_ids, theta, beta,segment_ids, input_mask, lm_label_ids, is_next, masked_pos=masked_pos, masked_weights=masked_weights, task_idx=task_idx, masked_pos_2=oracle_pos, masked_weights_2=oracle_weights, masked_labels_2=oracle_labels, mask_qkv=mask_qkv)
+                    loss_tuple = unilm(input_ids, theta, beta, topic_embedding, args.topic_mode, segment_ids, input_mask, lm_label_ids, is_next, masked_pos=masked_pos, masked_weights=masked_weights, task_idx=task_idx, masked_pos_2=oracle_pos, masked_weights_2=oracle_weights, masked_labels_2=oracle_labels, mask_qkv=mask_qkv)
                     masked_lm_loss, next_sentence_loss = loss_tuple
 
                 ## topic loss 
@@ -542,7 +543,7 @@ def main():
                 unilm_model_to_save = unilm.module if hasattr(
                     unilm, 'module') else unilm  # Only save the model it-self
                 output_unilm_model_file = os.path.join(
-                    args.output_dir, "unilm_{0}.{1}.bin".format(args.experiment_name,i_epoch))
+                    args.output_dir, "unilm.{0}.bin".format(i_epoch))
                 torch.save(unilm_model_to_save.state_dict(), output_unilm_model_file)
                 # output_optim_unilm_file = os.path.join(
                 #     args.output_dir, "optim_unilm_{0}.{1}.bin".format(args.experiment_name,i_epoch))
@@ -553,7 +554,7 @@ def main():
                 topic_model_to_save = gsm.module if hasattr(
                     gsm, 'module') else gsm  # Only save the model it-self
                 output_topic_model_file = os.path.join(
-                    args.output_dir, "topic_{0}.{1}.ckpt".format(args.experiment_name, i_epoch))
+                    args.output_dir, "topic.{0}.ckpt".format(i_epoch))
                 torch.save(topic_model_to_save.state_dict(), output_topic_model_file)
                 # output_optim_topic_file = os.path.join(
                 #     args.output_dir, "optim_topic_{0}.{1}.bin".format(args.experiment_name,i_epoch))
@@ -565,12 +566,12 @@ def main():
         # plt.plot(range(len(topicloss_lst)), topicloss_lst)
         plt.plot(range(len(smth_pts)),smth_pts)
         plt.xlabel('epochs')
-        plt.title('Train Loss')
-        plt.savefig('topic_loss.png')  
+        plt.title('Topic Model Train Loss')
+        plt.savefig(args.output_dir + '/topic_loss.png')  
         plt.cla()
         plt.plot(range(len(unilmloss_lst)), unilmloss_lst)
         plt.xlabel('epochs')
-        plt.title('Train Loss')
-        plt.savefig('unilm_loss.png')  
+        plt.title('Unilm Train Loss')
+        plt.savefig(args.output_dir + '/unilm_loss.png')  
 if __name__ == "__main__":
     main()

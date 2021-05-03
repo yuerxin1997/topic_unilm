@@ -76,7 +76,8 @@ def main():
                         help="Number of different <Q,K,V>.")
     parser.add_argument('--seg_emb', action='store_true',
                         help="Using segment embedding for self-attention.")
-
+    parser.add_argument('--topic_mode', default=1, type=int,
+                        help="opic attenion type")
     # decoding parameters
     parser.add_argument('--fp16', action='store_true',
                         help="Whether to use 16-bit float precision instead of 32-bit")
@@ -161,7 +162,6 @@ def main():
         (1 if args.s2s_add_segment else 0) if args.new_segment_ids else 2
     mask_word_id, eos_word_ids, sos_word_id = tokenizer.convert_tokens_to_ids(
         ["[MASK]", "[SEP]", "[S2S_SOS]"])
-    print("11111")
     def _get_token_id_set(s):
         r = None
         if s:
@@ -175,10 +175,8 @@ def main():
         return r
     forbid_ignore_set = _get_token_id_set(args.forbid_ignore_word)
     not_predict_set = _get_token_id_set(args.not_predict_token)
-    print("2222")
     for unilm_model_recover_path in glob.glob(args.unilm_model_recover_path.strip()): #model_recover_path 就一个XXX/unilm.1.bin
         unilm_model_recover = torch.load(unilm_model_recover_path)
-        print("unilm_model_recover", unilm_model_recover.keys())
         unilm = BertForSeq2SeqDecoder.from_pretrained(args.bert_model, state_dict=unilm_model_recover, num_labels=cls_num_labels, num_rel=pair_num_relation, type_vocab_size=type_vocab_size, task_idx=3, mask_word_id=mask_word_id, search_beam_size=args.beam_size,
                                                       length_penalty=args.length_penalty, eos_id=eos_word_ids, sos_id=sos_word_id, forbid_duplicate_ngrams=args.forbid_duplicate_ngrams, forbid_ignore_set=forbid_ignore_set, not_predict_set=not_predict_set, ngram_size=args.ngram_size, min_len=args.min_len, mode=args.mode, max_position_embeddings=args.max_seq_length, ffn_type=args.ffn_type, num_qkv=args.num_qkv, seg_emb=args.seg_emb, pos_shift=args.pos_shift)
         topic_model_recover = torch.load(args.topic_model_recover_path)
@@ -218,7 +216,6 @@ def main():
         output_lines = [""] * len(input_lines) #一维[]
         score_trace_list = [None] * len(input_lines)
         total_batch = math.ceil(len(input_lines) / args.batch_size) 
-        print("3333")
         # get topic_model bows
         def detokenize(tk_list):
             r_list = []
@@ -275,10 +272,10 @@ def main():
                     batch = [
                         t.to(device) if t is not None else None for t in batch]
                     batch_bow = torch.stack(batch_bow)
-                    batch_bow = batch_bow.to(device) 
+                    batch_bow = batch_bow.to(device)
                     input_ids, token_type_ids, position_ids, input_mask, mask_qkv, task_idx = batch
-                    p_x,mus,log_vars,theta,beta = gsm(batch_bow)  
-                    traces = unilm(input_ids, theta,beta, token_type_ids,
+                    p_x,mus,log_vars,theta,beta,topic_embedding = gsm(batch_bow)  
+                    traces = unilm(input_ids, theta,beta, topic_embedding,args.topic_mode,token_type_ids,
                                    position_ids, input_mask, task_idx=task_idx, mask_qkv=mask_qkv)
                     
                     if args.beam_size > 1:
