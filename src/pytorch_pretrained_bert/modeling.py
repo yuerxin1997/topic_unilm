@@ -393,6 +393,7 @@ class BertSelfAttention(nn.Module):
                 :-2] + (self.all_head_size,) #就是看输出要多少size [batch,192,768]
             topic_context_layer_2 = topic_context_layer_2.view(*topic_new_context_layer_shape) #按size输出        
             topic_context_layer = None
+        
         ##self_attention
         if history_states is None: #都是none
             mixed_query_layer = self.query(hidden_states) #mixed_query_layer = [batch,192,768] = [batch,192,768] * [768,768]

@@ -431,8 +431,6 @@ class Preprocess4Seq2seqDecoder(Pipeline):
 
     def __call__(self, instance):
         tokens_a, max_a_len = instance
-        print("instance", instance[0], instance[1])
-        print("tokens_a", type(tokens_a))
         # Add Special Tokens
         if self.s2s_special_token:
             padded_tokens_a = ['[S2S_CLS]'] + tokens_a + ['[S2S_SEP]']

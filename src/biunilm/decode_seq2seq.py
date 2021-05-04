@@ -246,6 +246,9 @@ def main():
             else:
                 bows.append([(1999,1)])
         docs = _docs
+        # gensim.corpora.MmCorpus.serialize(os.path.join(data_dir,'corpus.mm'), bows)
+        # dictionary.save_as_text(os.path.join(data_dir,'dict.txt'))
+        # pickle.dump(self.docs,open(os.path.join(data_dir,'docs.pkl'),'wb'))
         # topic_model bows end 
         
         with tqdm(total=total_batch) as pbar:
