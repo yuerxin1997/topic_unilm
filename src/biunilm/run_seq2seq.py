@@ -1,4 +1,4 @@
-"""BERT finetuning runner. V5/4"""
+"""BERT finetuning runner. V 5/11"""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -19,7 +19,7 @@ from torch.utils.data import RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
 import sys
-sys.path.append("/home/hejingbo/topic_unilm/src/")
+sys.path.append("/home/yuerxin/topic_unilm/src/")
 from pytorch_pretrained_bert.tokenization import BertTokenizer, WhitespaceTokenizer
 from pytorch_pretrained_bert.modeling import BertForPreTrainingLossMask
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
@@ -90,10 +90,10 @@ def main():
                         default=None,
                         type=str,
                         help="The file of pretraining optimizer.")
-    parser.add_argument("--topic_mode",
-                        default=1,
-                        type=int,
-                        help="The file of pretraining optimizer.")
+    parser.add_argument('--topic_mode', default=1, type=float,
+                        help="1:idea1 1.1:idea1_wo_theta 2:idea2 ")
+    parser.add_argument('--topic_embedding_size', default=768, type=int,
+                        help="opic attenion type")
     # Other parameters
     parser.add_argument("--max_seq_length",
                         default=192,
@@ -344,7 +344,7 @@ def main():
         unilm = BertForPreTrainingLossMask.from_pretrained(
             args.bert_model, state_dict=model_recover, num_labels=cls_num_labels, num_rel=0, type_vocab_size=type_vocab_size, config_path=args.config_path, task_idx=3, num_sentlvl_labels=num_sentlvl_labels, max_position_embeddings=args.max_position_embeddings, label_smoothing=args.label_smoothing, fp32_embedding=args.fp32_embedding, relax_projection=relax_projection, new_pos_ids=args.new_pos_ids, ffn_type=args.ffn_type, hidden_dropout_prob=args.hidden_dropout_prob, attention_probs_dropout_prob=args.attention_probs_dropout_prob, num_qkv=args.num_qkv, seg_emb=args.seg_emb)
     #1. 模型初始化，入口定义好
-    gsm = GSM()
+    gsm = GSM(encode_dims=[2000,args.topic_embedding_size,20],decode_dims=[20,args.topic_embedding_size,2000])
 
     if args.local_rank == 0:
         dist.barrier()

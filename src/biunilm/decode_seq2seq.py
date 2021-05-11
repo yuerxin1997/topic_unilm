@@ -16,8 +16,7 @@ from torch.utils.data.distributed import DistributedSampler
 import random
 import pickle
 import sys
-sys.path.append("/home/hejingbo/topic_unilm/src/")
-print(sys.path)
+sys.path.append("/home/yuerxin/topic_unilm/src/")
 from topic_model.gsm import GSM
 from pytorch_pretrained_bert.tokenization import BertTokenizer, WhitespaceTokenizer
 from pytorch_pretrained_bert.modeling import BertForSeq2SeqDecoder
@@ -76,7 +75,9 @@ def main():
                         help="Number of different <Q,K,V>.")
     parser.add_argument('--seg_emb', action='store_true',
                         help="Using segment embedding for self-attention.")
-    parser.add_argument('--topic_mode', default=1, type=int,
+    parser.add_argument('--topic_mode', default=1, type=float,
+                        help="1:idea1 1.1:idea1_wo_theta 2:idea2 ")
+    parser.add_argument('--topic_embedding_size', default=768, type=int,
                         help="opic attenion type")
     # decoding parameters
     parser.add_argument('--fp16', action='store_true',
@@ -155,7 +156,7 @@ def main():
     if args.fp16 and args.amp:
         from apex import amp
         amp_handle = amp.init(enable_caching=True)
-        logger.info("enable fp16 with amp")
+        # logger.info("enable fp16 with amp")
     # Prepare model
     cls_num_labels = 2
     type_vocab_size = 6 + \
@@ -180,7 +181,7 @@ def main():
         unilm = BertForSeq2SeqDecoder.from_pretrained(args.bert_model, state_dict=unilm_model_recover, num_labels=cls_num_labels, num_rel=pair_num_relation, type_vocab_size=type_vocab_size, task_idx=3, mask_word_id=mask_word_id, search_beam_size=args.beam_size,
                                                       length_penalty=args.length_penalty, eos_id=eos_word_ids, sos_id=sos_word_id, forbid_duplicate_ngrams=args.forbid_duplicate_ngrams, forbid_ignore_set=forbid_ignore_set, not_predict_set=not_predict_set, ngram_size=args.ngram_size, min_len=args.min_len, mode=args.mode, max_position_embeddings=args.max_seq_length, ffn_type=args.ffn_type, num_qkv=args.num_qkv, seg_emb=args.seg_emb, pos_shift=args.pos_shift)
         topic_model_recover = torch.load(args.topic_model_recover_path)
-        gsm = GSM()
+        gsm = GSM(encode_dims=[2000,args.topic_embedding_size,20],decode_dims=[20,args.topic_embedding_size,2000])
 
         gsm.load_state_dict(topic_model_recover)
         del unilm_model_recover
@@ -204,7 +205,7 @@ def main():
         with open(args.input_file, encoding="utf-8") as fin:
             input_lines = [x.strip() for x in fin.readlines()]
             if args.subset > 0: #==0 可忽略
-                logger.info("Decoding subset: %d", args.subset)
+                # logger.info("Decoding subset: %d", args.subset)
                 input_lines = input_lines[:args.subset]
         data_tokenizer = WhitespaceTokenizer() if args.tokenized_input else tokenizer
         input_lines = [data_tokenizer.tokenize(

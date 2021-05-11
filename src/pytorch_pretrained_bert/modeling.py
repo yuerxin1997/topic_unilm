@@ -275,12 +275,13 @@ class BertSelfAttention(nn.Module):
                              self.all_head_size*self.num_qkv)
         self.value = nn.Linear(
             config.hidden_size, self.all_head_size*self.num_qkv)
-
+        # idea 1
         self.W_0 = nn.Linear(2000, config.hidden_size)
         self.w_q = nn.Linear(config.hidden_size, config.hidden_size)   
         self.W_k = nn.Linear(config.hidden_size, config.hidden_size)   
         self.W_v = nn.Linear(config.hidden_size, config.hidden_size)
 
+        # idea 2
         self.WQa = nn.Linear(config.hidden_size, config.hidden_size)
         self.WQc = nn.Linear(config.hidden_size, config.hidden_size)   
         self.WKa = nn.Linear(config.hidden_size, config.hidden_size)
@@ -330,12 +331,14 @@ class BertSelfAttention(nn.Module):
         # (batch, head, pos, head_hid)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, hidden_states,  theta, beta, topic_embedding, topic_mode, attention_mask, history_states=None, mask_qkv=None, seg_ids=None):
+    def forward(self, hidden_states,  theta, beta, topic_embedding, layer_id, topic_mode, attention_mask, history_states=None, mask_qkv=None, seg_ids=None):
         #hideen_states = [batch,192,768]
         #theta = [batch,K] topic-document distribution
         #beta = [K,2000] topic-words distribution
         #topic_embedding = [K, 768]
-        if topic_mode == 1:
+        topic_context_layer = None
+        topic_context_layer_2 = None
+        if (topic_mode == 1 or topic_mode == 1.1) and layer_id == 11 :
             ##topic_attention 1
             fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
             # fi = topic_embedding
@@ -343,19 +346,18 @@ class BertSelfAttention(nn.Module):
             Q = self.w_q(hidden_states) #[batch,192,768] = [batch,192,768] * [768,768]
             K = self.W_k(fi) #[k,768] = [k,768] * [768,768]
             V = self.W_v(K) #[k,768] = [k,768] * [768,768]
-
-            K = torch.unsqueeze(K,0) # [1, k, 768]
-            theta = torch.unsqueeze(theta,1) # [batch,1,k]
-            topic_attention_scores = torch.matmul(
-                Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2) * theta) #  后面= [batch,768,k] = [1,768,k]*[batch,1,k]  Q*后面=[batch,192,k=[batch,192,768]*[batch,768,k]  
-                
-            # topic_attention_scores = torch.matmul(
-            #      Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2))   # Q = [batch,192,768] * [768,k] = [batch,192,k]    
+            if topic_mode == 1:
+                K = torch.unsqueeze(K,0) # [1, k, 768]
+                theta = torch.unsqueeze(theta,1) # [batch,1,k]
+                topic_attention_scores = torch.matmul(
+                    Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2) * theta) #  后面= [batch,768,k] = [1,768,k]*[batch,1,k]  Q*后面=[batch,192,k=[batch,192,768]*[batch,768,k]  
+            else:    
+                topic_attention_scores = torch.matmul(
+                      Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2))   # Q = [batch,192,768] * [768,k] = [batch,192,k]    
             topic_attention_probs = nn.Softmax(dim=-1)(topic_attention_scores) #[batch,192,k]
             topic_attention_probs = self.dropout(topic_attention_probs)
             topic_context_layer = torch.matmul(topic_attention_probs, V) # [batch,192,768] = [batch,192,k] * [k,768]
-            topic_context_layer_2 = None
-        if topic_mode == 2:
+        if (topic_mode == 2) and layer_id == 11:
             ##topic_attention 2
             # print("torch.matmul(theta, topic_embedding)", torch.matmul(theta, topic_embedding).size(),theta.size()[0], topic_embedding.size()[1], topic_embedding.size()[1])
             WQ_middle = torch.unsqueeze(torch.matmul(theta, topic_embedding), 2).expand(theta.size()[0], topic_embedding.size()[1], topic_embedding.size()[1]) #[batch,E,E]
@@ -392,7 +394,6 @@ class BertSelfAttention(nn.Module):
             topic_new_context_layer_shape = topic_context_layer_2.size()[
                 :-2] + (self.all_head_size,) #就是看输出要多少size [batch,192,768]
             topic_context_layer_2 = topic_context_layer_2.view(*topic_new_context_layer_shape) #按size输出        
-            topic_context_layer = None
         
         ##self_attention
         if history_states is None: #都是none
@@ -434,7 +435,7 @@ class BertSelfOutput(nn.Module):
         hidden_states = self.dropout(hidden_states)
 
         if layer_id==11:
-            if topic_mode == 1:
+            if topic_mode == 1 or topic_mode == 1.1:
                 hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output)
             else:
                 hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output_2)
@@ -451,7 +452,7 @@ class BertAttention(nn.Module):
 
     def forward(self, input_tensor, theta, beta, topic_embedding, layer_id, topic_mode, attention_mask, history_states=None, mask_qkv=None, seg_ids=None):
         self_output, self_topic_output, self_topic_output_2 = self.self(
-            input_tensor, theta, beta, topic_embedding, topic_mode, attention_mask, history_states=history_states, mask_qkv=mask_qkv, seg_ids=seg_ids)
+            input_tensor, theta, beta, topic_embedding, layer_id, topic_mode, attention_mask, history_states=history_states, mask_qkv=mask_qkv, seg_ids=seg_ids)
         attention_output = self.output(self_output, input_tensor, self_topic_output, self_topic_output_2, layer_id, topic_mode)
         return attention_output
 
