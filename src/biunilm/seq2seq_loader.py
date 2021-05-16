@@ -105,27 +105,27 @@ class Seq2SeqDataset(torch.utils.data.Dataset):
         self.bows,self.docs = None,[]
         stopwords = None
         
-        if os.path.exists(os.path.join(data_dir,'corpus.mm')):
+        if False and os.path.exists(os.path.join(data_dir,'corpus.mm')):
             self.bows = gensim.corpora.MmCorpus(os.path.join(data_dir,'corpus.mm'))
             self.dictionary = Dictionary.load_from_text(os.path.join(data_dir,'dict.txt'))
             self.docs = pickle.load(open(os.path.join(data_dir,'docs.pkl'),'rb'))
-            self.dictionary.id2token = {v:k for k,v in self.dictionary.token2id.items()} # because id2token is empty be default, it is a bug.
+            self.dictionary.id2token = {v:k for k,v in self.dictionary.token2id.items()} # because id2token is empty be 
         else:
             if stopwords==None:
                 stopwords_file = open(os.path.join(cwd,'data','topic_model','stopwords.txt'), 'r', encoding='utf-8')
                 stopwords = set([l.strip('\n').strip() for l in stopwords_file])
             jiebatokenizer = JiebaTokenizer(stopwords=stopwords)
             self.docs = jiebatokenizer.tokenize(self.txtLines)
-
+            self.dictionary = Dictionary.load_from_text(os.path.join(data_dir,'dict.txt'))
             # build dictionary
             # self.vob = [ [line.strip('\n')] for line in open(os.path.join(cwd,'data','topic_model','topic_model_vocab.txt'), 'r', encoding='utf-8')]
             # self.vob = self.vob[0:-1]
             # self.dictionary = Dictionary(self.vob)
             #self.dictionary.filter_n_most_frequent(remove_n=20)
-            self.dictionary = Dictionary(self.docs)
-            self.dictionary.filter_extremes(keep_n=2000-1)  # use Dictionary to remove un-relevant tokens
-            self.dictionary.compactify()
-            self.dictionary.id2token = {v:k for k,v in self.dictionary.token2id.items()} # because id2token is empty by default, it is a bug.
+            # self.dictionary = Dictionary(self.docs)
+            # self.dictionary.filter_extremes(keep_n=2000-1)  # use Dictionary to remove un-relevant tokens
+            # self.dictionary.compactify()
+            # self.dictionary.id2token = {v:k for k,v in self.dictionary.token2id.items()} # because id2token is empty by default, it is a bug.
             # convert to BOW representation
             self.bows, _docs = [],[]
             for doc in self.docs:
@@ -138,9 +138,10 @@ class Seq2SeqDataset(torch.utils.data.Dataset):
             self.docs = _docs
             # serialize the dictionary
             gensim.corpora.MmCorpus.serialize(os.path.join(data_dir,'corpus.mm'), self.bows)
-            self.dictionary.save_as_text(os.path.join(data_dir,'dict.txt'))
+            # self.dictionary.save_as_text(os.path.join(data_dir,'dict.txt'))
             pickle.dump(self.docs,open(os.path.join(data_dir,'docs.pkl'),'wb'))
-        self.vocabsize = len(self.dictionary) + 1
+            print("len(bows)", len(self.bows))
+        self.vocabsize = len(self.dictionary)
         
         
         if file_oracle is None:
@@ -151,6 +152,9 @@ class Seq2SeqDataset(torch.utils.data.Dataset):
                     assert len(src_tk) > 0
                     assert len(tgt_tk) > 0
                     self.ex_list.append((src_tk, tgt_tk))
+                # self.ex_list = self.ex_list[-200:-1]
+                # print("self.ex_list", len(self.ex_list))
+                # print("self.ex_list", self.ex_list[0])
         else:
             with open(file_src, "r", encoding='utf-8') as f_src, \
                     open(file_tgt, "r", encoding='utf-8') as f_tgt, \

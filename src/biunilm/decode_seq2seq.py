@@ -129,7 +129,6 @@ def main():
                         help="Do not predict the tokens during decoding.")
 
     args = parser.parse_args()
-
     if args.need_score_traces and args.beam_size <= 1:
         raise ValueError(
             "Score trace is only available for beam search with beam size > 1.")
@@ -176,146 +175,145 @@ def main():
         return r
     forbid_ignore_set = _get_token_id_set(args.forbid_ignore_word)
     not_predict_set = _get_token_id_set(args.not_predict_token)
-    for unilm_model_recover_path in glob.glob(args.unilm_model_recover_path.strip()): #model_recover_path 就一个XXX/unilm.1.bin
-        unilm_model_recover = torch.load(unilm_model_recover_path)
-        unilm = BertForSeq2SeqDecoder.from_pretrained(args.bert_model, state_dict=unilm_model_recover, num_labels=cls_num_labels, num_rel=pair_num_relation, type_vocab_size=type_vocab_size, task_idx=3, mask_word_id=mask_word_id, search_beam_size=args.beam_size,
-                                                      length_penalty=args.length_penalty, eos_id=eos_word_ids, sos_id=sos_word_id, forbid_duplicate_ngrams=args.forbid_duplicate_ngrams, forbid_ignore_set=forbid_ignore_set, not_predict_set=not_predict_set, ngram_size=args.ngram_size, min_len=args.min_len, mode=args.mode, max_position_embeddings=args.max_seq_length, ffn_type=args.ffn_type, num_qkv=args.num_qkv, seg_emb=args.seg_emb, pos_shift=args.pos_shift)
-        topic_model_recover = torch.load(args.topic_model_recover_path)
-        gsm = GSM(encode_dims=[2000,args.topic_embedding_size,20],decode_dims=[20,args.topic_embedding_size,2000])
+    unilm_model_recover = torch.load(args.unilm_model_recover_path)
+    unilm = BertForSeq2SeqDecoder.from_pretrained(args.bert_model, state_dict=unilm_model_recover, num_labels=cls_num_labels, num_rel=pair_num_relation, type_vocab_size=type_vocab_size, task_idx=3, mask_word_id=mask_word_id, search_beam_size=args.beam_size,
+                                                    length_penalty=args.length_penalty, eos_id=eos_word_ids, sos_id=sos_word_id, forbid_duplicate_ngrams=args.forbid_duplicate_ngrams, forbid_ignore_set=forbid_ignore_set, not_predict_set=not_predict_set, ngram_size=args.ngram_size, min_len=args.min_len, mode=args.mode, max_position_embeddings=args.max_seq_length, ffn_type=args.ffn_type, num_qkv=args.num_qkv, seg_emb=args.seg_emb, pos_shift=args.pos_shift)
+    topic_model_recover = torch.load(args.topic_model_recover_path)
+    gsm = GSM()
 
-        gsm.load_state_dict(topic_model_recover)
-        del unilm_model_recover
-        del topic_model_recover
+    gsm.load_state_dict(topic_model_recover)
+    del unilm_model_recover
+    del topic_model_recover
 
-        if args.fp16:
-            unilm.half()
-            gsm.half()
-        unilm.to(device)
-        gsm.to(device)
+    if args.fp16:
+        unilm.half()
+        gsm.half()
+    unilm.to(device)
+    gsm.to(device)
 
-        if n_gpu > 1:
-            unilm = torch.nn.DataParallel(unilm)
-            gsm = torch.nn.DataParallel(gsm)
-        torch.cuda.empty_cache()
-        unilm.eval()
-        gsm.eval()
-        next_i = 0
-        max_src_length = args.max_seq_length - 2 - args.max_tgt_length
+    if n_gpu > 1:
+        unilm = torch.nn.DataParallel(unilm)
+        gsm = torch.nn.DataParallel(gsm)
+    torch.cuda.empty_cache()
+    unilm.eval()
+    gsm.eval()
+    next_i = 0
+    max_src_length = args.max_seq_length - 2 - args.max_tgt_length
 
-        with open(args.input_file, encoding="utf-8") as fin:
-            input_lines = [x.strip() for x in fin.readlines()]
-            if args.subset > 0: #==0 可忽略
-                # logger.info("Decoding subset: %d", args.subset)
-                input_lines = input_lines[:args.subset]
-        data_tokenizer = WhitespaceTokenizer() if args.tokenized_input else tokenizer
-        input_lines = [data_tokenizer.tokenize(
-            x)[:max_src_length] for x in input_lines]
+    with open(args.input_file, encoding="utf-8") as fin:
+        input_lines = [x.strip() for x in fin.readlines()]
+        if args.subset > 0: #==0 可忽略
+            # logger.info("Decoding subset: %d", args.subset)
+            input_lines = input_lines[:args.subset]
+    data_tokenizer = WhitespaceTokenizer() if args.tokenized_input else tokenizer
+    input_lines = [data_tokenizer.tokenize(
+        x)[:max_src_length] for x in input_lines]
 
-        input_lines = sorted(list(enumerate(input_lines)),
-                             key=lambda x: -len(x[1])) #input_lines = [(ori_index,[tokens]), (ori_index,[tokens])] 按照文本长度倒着排
+    input_lines = sorted(list(enumerate(input_lines)),
+                            key=lambda x: -len(x[1])) #input_lines = [(ori_index,[tokens]), (ori_index,[tokens])] 按照文本长度倒着排
 
-        output_lines = [""] * len(input_lines) #一维[]
-        score_trace_list = [None] * len(input_lines)
-        total_batch = math.ceil(len(input_lines) / args.batch_size) 
-        # get topic_model bows
-        def detokenize(tk_list):
-            r_list = []
-            for tk in tk_list:
-                if tk.startswith('##') and len(r_list) > 0:
-                    r_list[-1] = r_list[-1] + tk[2:]
-                else:
-                    r_list.append(tk)
-            return r_list
-        txtLines = []
-        for input_line in input_lines:
-            textline = " ".join(detokenize(input_line[1]))
-            txtLines.append(textline) 
-        cwd = os.getcwd()
-        dictionary = Dictionary.load_from_text(os.path.join(args.data_path,'dict.txt'))
-        dictionary.id2token = {v:k for k,v in dictionary.token2id.items()} # because id2token is empty be default, it is a bug.
-        stopwords = set([l.strip('\n').strip() for l in open(os.path.join(cwd,'data/topic_model','stopwords.txt'),'r',encoding='utf-8')])
-        topic_tokenizer = seq2seq_loader.JiebaTokenizer(stopwords=stopwords)
-        docs = topic_tokenizer.tokenize(txtLines)
-        # convert to BOW representation
-        bows, _docs = [],[]
-        vocabsize = len(dictionary) + 1
-        for doc in docs:
-            _bow = dictionary.doc2bow(doc)
-            if _bow!=[]:
-                _docs.append(list(doc))
-                bows.append(_bow)
+    output_lines = [""] * len(input_lines) #一维[]
+    score_trace_list = [None] * len(input_lines)
+    total_batch = math.ceil(len(input_lines) / args.batch_size) 
+    # get topic_model bows
+    def detokenize(tk_list):
+        r_list = []
+        for tk in tk_list:
+            if tk.startswith('##') and len(r_list) > 0:
+                r_list[-1] = r_list[-1] + tk[2:]
             else:
-                bows.append([(1999,1)])
-        docs = _docs
-        # gensim.corpora.MmCorpus.serialize(os.path.join(data_dir,'corpus.mm'), bows)
-        # dictionary.save_as_text(os.path.join(data_dir,'dict.txt'))
-        # pickle.dump(self.docs,open(os.path.join(data_dir,'docs.pkl'),'wb'))
-        # topic_model bows end 
-        
-        with tqdm(total=total_batch) as pbar:
-            while next_i < len(input_lines):
-                _chunk = input_lines[next_i:next_i + args.batch_size] #如果超过就到最后一个，这是list[a:b]的特性
-                buf_id = [x[0] for x in _chunk]
-                buf = [x[1] for x in _chunk]              
-                max_a_len = max([len(x) for x in buf])
-                instances = []
-                batch_bow = []
-                for i in range(next_i, next_i + args.batch_size):
-                    if i < len(input_lines):
-                        bow = torch.zeros(vocabsize)
-                        item = list(zip(*bows[i])) # bow = [[token_id1,token_id2,...],[freq1,freq2,...]]
-                        bow[list(item[0])] = torch.tensor(list(item[1])).float()  
-                        batch_bow.append(bow) 
-                next_i += args.batch_size
-                for instance in [(x, max_a_len) for x in buf]:
-                    for proc in bi_uni_pipeline: #proc 是 Preprocess4Seq2seqDecoder  相当于可以把数据给padding
-                        instances.append(proc(instance)) 
-                with torch.no_grad():
-                    batch = seq2seq_loader.batch_list_to_batch_tensors(
-                        instances)
-                    batch = [
-                        t.to(device) if t is not None else None for t in batch]
-                    batch_bow = torch.stack(batch_bow)
-                    batch_bow = batch_bow.to(device)
-                    input_ids, token_type_ids, position_ids, input_mask, mask_qkv, task_idx = batch
-                    p_x,mus,log_vars,theta,beta,topic_embedding = gsm(batch_bow)  
-                    traces = unilm(input_ids, theta,beta, topic_embedding,args.topic_mode,token_type_ids,
-                                   position_ids, input_mask, task_idx=task_idx, mask_qkv=mask_qkv)
-                    
-                    if args.beam_size > 1:
-                        traces = {k: v.tolist() for k, v in traces.items()}
-                        output_ids = traces['pred_seq']
-                    else:
-                        output_ids = traces.tolist()
-                    for i in range(len(buf)):
-                        w_ids = output_ids[i]
-                        output_buf = tokenizer.convert_ids_to_tokens(w_ids)
-                        output_tokens = []
-                        for t in output_buf:
-                            if t in ("[SEP]", "[PAD]"):
-                                break
-                            output_tokens.append(t)
-                        output_sequence = ' '.join(detokenize(output_tokens))
-                        output_lines[buf_id[i]] = output_sequence
-                        if args.need_score_traces:
-                            score_trace_list[buf_id[i]] = {
-                                'scores': traces['scores'][i], 'wids': traces['wids'][i], 'ptrs': traces['ptrs'][i]}
-                pbar.update(1)
-        if args.output_file:
-            fn_out = args.output_file
+                r_list.append(tk)
+        return r_list
+    txtLines = []
+    for input_line in input_lines:
+        textline = " ".join(detokenize(input_line[1]))
+        txtLines.append(textline) 
+    cwd = os.getcwd()
+    dictionary = Dictionary.load_from_text(os.path.join(args.data_path,'dict.txt'))
+    dictionary.id2token = {v:k for k,v in dictionary.token2id.items()} # because id2token is empty be default, it is a bug.
+    stopwords = set([l.strip('\n').strip() for l in open(os.path.join(cwd,'data/topic_model','stopwords.txt'),'r',encoding='utf-8')])
+    topic_tokenizer = seq2seq_loader.JiebaTokenizer(stopwords=stopwords)
+    docs = topic_tokenizer.tokenize(txtLines)
+    # convert to BOW representation
+    bows, _docs = [],[]
+    vocabsize = len(dictionary)
+    for doc in docs:
+        _bow = dictionary.doc2bow(doc)
+        if _bow!=[]:
+            _docs.append(list(doc))
+            bows.append(_bow)
         else:
-            fn_out = unilm_model_recover_path+'.'+args.split
-        with open(fn_out, "w", encoding="utf-8") as fout:
-            for l in output_lines:
-                fout.write(l)
-                fout.write("\n")
+            bows.append([(1999,1)])
+    docs = _docs
+    # gensim.corpora.MmCorpus.serialize(os.path.join(data_dir,'corpus.mm'), bows)
+    # dictionary.save_as_text(os.path.join(data_dir,'dict.txt'))
+    # pickle.dump(self.docs,open(os.path.join(data_dir,'docs.pkl'),'wb'))
+    # topic_model bows end 
+    
+    with tqdm(total=total_batch) as pbar:
+        while next_i < len(input_lines):
+            _chunk = input_lines[next_i:next_i + args.batch_size] #如果超过就到最后一个，这是list[a:b]的特性
+            buf_id = [x[0] for x in _chunk]
+            buf = [x[1] for x in _chunk]              
+            max_a_len = max([len(x) for x in buf])
+            instances = []
+            batch_bow = []
+            for i in range(next_i, next_i + args.batch_size):
+                if i < len(input_lines):
+                    bow = torch.zeros(vocabsize)
+                    item = list(zip(*bows[i])) # bow = [[token_id1,token_id2,...],[freq1,freq2,...]]
+                    bow[list(item[0])] = torch.tensor(list(item[1])).float()  
+                    batch_bow.append(bow) 
+            next_i += args.batch_size
+            for instance in [(x, max_a_len) for x in buf]:
+                for proc in bi_uni_pipeline: #proc 是 Preprocess4Seq2seqDecoder  相当于可以把数据给padding
+                    instances.append(proc(instance)) 
+            with torch.no_grad():
+                batch = seq2seq_loader.batch_list_to_batch_tensors(
+                    instances)
+                batch = [
+                    t.to(device) if t is not None else None for t in batch]
+                batch_bow = torch.stack(batch_bow)
+                batch_bow = batch_bow.to(device)
+                input_ids, token_type_ids, position_ids, input_mask, mask_qkv, task_idx = batch
+                p_x,mus,log_vars,theta,beta,topic_embedding = gsm(batch_bow)  
+                traces = unilm(input_ids, theta,beta, topic_embedding,args.topic_mode,token_type_ids,
+                                position_ids, input_mask, task_idx=task_idx, mask_qkv=mask_qkv)
+                
+                if args.beam_size > 1:
+                    traces = {k: v.tolist() for k, v in traces.items()}
+                    output_ids = traces['pred_seq']
+                else:
+                    output_ids = traces.tolist()
+                for i in range(len(buf)):
+                    w_ids = output_ids[i]
+                    output_buf = tokenizer.convert_ids_to_tokens(w_ids)
+                    output_tokens = []
+                    for t in output_buf:
+                        if t in ("[SEP]", "[PAD]"):
+                            break
+                        output_tokens.append(t)
+                    output_sequence = ' '.join(detokenize(output_tokens))
+                    output_lines[buf_id[i]] = output_sequence
+                    if args.need_score_traces:
+                        score_trace_list[buf_id[i]] = {
+                            'scores': traces['scores'][i], 'wids': traces['wids'][i], 'ptrs': traces['ptrs'][i]}
+            pbar.update(1)
+    if args.output_file:
+        fn_out = args.output_file
+    else:
+        fn_out = args.unilm_model_recover_path+'.'+args.split
+    with open(fn_out, "w", encoding="utf-8") as fout:
+        for l in output_lines:
+            fout.write(l)
+            fout.write("\n")
 
-        if args.need_score_traces:
-            with open(fn_out + ".trace.pickle", "wb") as fout_trace:
-                pickle.dump(
-                    {"version": 0.0, "num_samples": len(input_lines)}, fout_trace)
-                for x in score_trace_list:
-                    pickle.dump(x, fout_trace)
+    if args.need_score_traces:
+        with open(fn_out + ".trace.pickle", "wb") as fout_trace:
+            pickle.dump(
+                {"version": 0.0, "num_samples": len(input_lines)}, fout_trace)
+            for x in score_trace_list:
+                pickle.dump(x, fout_trace)
 
 
 if __name__ == "__main__":

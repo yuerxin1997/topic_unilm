@@ -16,15 +16,23 @@ import torch.nn.functional as F
 
 # GSM model
 class GSM(nn.Module):
-    def __init__(self, encode_dims=[2000,500,20],decode_dims=[20,500,2000],dropout=0.8):
+    def __init__(self, encode_dims=[2000,768,50],decode_dims=[50,768,2000],dropout=0.0):
 
         super(GSM, self).__init__()
-        self.hidden_encoder = nn.Linear(encode_dims[0],encode_dims[1]) #[2000,768]
+        # self.hidden_encoder = nn.Linear(encode_dims[0],encode_dims[1]) #[2000,768]
+        self.encoder = nn.ModuleDict({
+            f'enc_{i}':nn.Linear(encode_dims[i],encode_dims[i+1]) 
+            for i in range(len(encode_dims)-2)
+        })
         self.fc_mu = nn.Linear(encode_dims[1],encode_dims[2]) #[768,20]
         self.fc_logvar = nn.Linear(encode_dims[1],encode_dims[2]) #[768,20]
 
-        self.hidden_decoder_1 = nn.Linear(decode_dims[0],decode_dims[1]) #[20,768]
-        self.hidden_decoder_2 = nn.Linear(decode_dims[1],decode_dims[2]) #[768,2000]
+        # self.hidden_decoder_1 = nn.Linear(decode_dims[0],decode_dims[1]) #[20,768]
+        # self.hidden_decoder_2 = nn.Linear(decode_dims[1],decode_dims[2]) #[768,2000]
+        # self.decoder = nn.ModuleDict({
+        #     f'dec_{i}':nn.Linear(decode_dims[i],decode_dims[i+1])
+        #     for i in range(len(decode_dims)-1)
+        # })
         self.dropout = nn.Dropout(p=dropout)
         self.fc1 = nn.Linear(encode_dims[-1],encode_dims[-1])
 
@@ -44,8 +52,12 @@ class GSM(nn.Module):
         self.beta = None
 
     def encode(self, x):
-        hid = F.relu(self.dropout(self.hidden_encoder(x))) #[batch,768] = [batch,2000] * [2000,768]
-        mu, log_var = self.fc_mu(hid), self.fc_logvar(hid) #[batch,20] = [batch,768] * [768,20]
+        hid = x
+        # hid1 = F.relu(self.dropout(self.hidden_encoder1(x))) #[batch,500] = [batch,2000] * [2000,500]
+        # hid2 = F.relu(self.dropout(self.hidden_encoder2(hid1)))
+        for i,layer in self.encoder.items():
+            hid = F.relu(self.dropout(layer(hid)))
+        mu, log_var = self.fc_mu(hid), self.fc_logvar(hid) #[batch,20] = [batch,500] * [500,20]
         return mu, log_var
 
     def inference(self,x):

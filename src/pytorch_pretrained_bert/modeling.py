@@ -340,8 +340,8 @@ class BertSelfAttention(nn.Module):
         topic_context_layer_2 = None
         if (topic_mode == 1 or topic_mode == 1.1) and layer_id == 11 :
             ##topic_attention 1
-            fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
-            # fi = topic_embedding
+            # fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
+            fi = topic_embedding
             fi = self.LayerNorm(fi)
             Q = self.w_q(hidden_states) #[batch,192,768] = [batch,192,768] * [768,768]
             K = self.W_k(fi) #[k,768] = [k,768] * [768,768]
@@ -349,6 +349,7 @@ class BertSelfAttention(nn.Module):
             if topic_mode == 1:
                 K = torch.unsqueeze(K,0) # [1, k, 768]
                 theta = torch.unsqueeze(theta,1) # [batch,1,k]
+                # print("Q,k,theta",Q.size(),K.size(),theta.size())
                 topic_attention_scores = torch.matmul(
                     Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2) * theta) #  后面= [batch,768,k] = [1,768,k]*[batch,1,k]  Q*后面=[batch,192,k=[batch,192,768]*[batch,768,k]  
             else:    

@@ -19,7 +19,6 @@ from torch.utils.data import RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
 import sys
-sys.path.append("/home/yuerxin/topic_unilm/src/")
 from pytorch_pretrained_bert.tokenization import BertTokenizer, WhitespaceTokenizer
 from pytorch_pretrained_bert.modeling import BertForPreTrainingLossMask
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
@@ -344,8 +343,11 @@ def main():
         unilm = BertForPreTrainingLossMask.from_pretrained(
             args.bert_model, state_dict=model_recover, num_labels=cls_num_labels, num_rel=0, type_vocab_size=type_vocab_size, config_path=args.config_path, task_idx=3, num_sentlvl_labels=num_sentlvl_labels, max_position_embeddings=args.max_position_embeddings, label_smoothing=args.label_smoothing, fp32_embedding=args.fp32_embedding, relax_projection=relax_projection, new_pos_ids=args.new_pos_ids, ffn_type=args.ffn_type, hidden_dropout_prob=args.hidden_dropout_prob, attention_probs_dropout_prob=args.attention_probs_dropout_prob, num_qkv=args.num_qkv, seg_emb=args.seg_emb)
     #1. 模型初始化，入口定义好
-    gsm = GSM(encode_dims=[2000,args.topic_embedding_size,20],decode_dims=[20,args.topic_embedding_size,2000])
-
+    gsm = GSM()
+    ckpt = "/home/yuerxin/Neural_Topic_Models/ckpt/GSM_ggw10k_tp50_ep200.ckpt"
+    gsm_checkpoint=torch.load(ckpt)
+    gsm.load_state_dict(gsm_checkpoint["net"])
+    
     if args.local_rank == 0:
         dist.barrier()
 
@@ -372,15 +374,16 @@ def main():
     # Prepare optimizer
     param_optimizer = list(unilm.named_parameters())
     param_optimizer_topic = list(gsm.named_parameters())
-    # for name, parameters in param_optimizer:
-    #     print(name, ':', parameters.size())
+    # for name, parameters in param_optimizer_topic:
+    #     print(name, ':', parameters)
+    # exit()
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
         {'params': [p for n, p in param_optimizer if not any(
             nd in n for nd in no_decay)], 'weight_decay': 0.01, 'topic':False},
         {'params': [p for n, p in param_optimizer if any(
             nd in n for nd in no_decay)], 'weight_decay': 0.0, 'topic':False},        
-        {'params': [p for n, p in param_optimizer_topic], 'weight_decay': 0.0, 'lr':5e-5, 'topic':True}
+        {'params': [p for n, p in param_optimizer_topic], 'weight_decay': 0.0, 'lr':1e-3, 'topic':True}
     ]
     #一部分是有weight的，一部分是没有weight_dacay的
     if args.fp16:
@@ -412,7 +415,7 @@ def main():
                              warmup=args.warmup_proportion,
                              t_total=t_total)
         topic_optimizer = torch.optim.Adam(gsm.parameters(),
-                        lr=5e-5)
+                        lr=1e-3)
     if recover_step:
         logger.info("***** Recover optimizer: %d *****", recover_step)
         optim_recover = torch.load(os.path.join(
