@@ -63,6 +63,8 @@ def main():
                         help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
     parser.add_argument("--src_file", default=None, type=str,
                         help="The input data file name.")
+    parser.add_argument("--topic_model_recover_path", default=None, type=str,
+                        help="The file of fine-tuned pretraining topic model.")
     parser.add_argument("--tgt_file", default=None, type=str,
                         help="The output data file name.")
     parser.add_argument("--bert_model", default=None, type=str, required=True,
@@ -344,8 +346,7 @@ def main():
             args.bert_model, state_dict=model_recover, num_labels=cls_num_labels, num_rel=0, type_vocab_size=type_vocab_size, config_path=args.config_path, task_idx=3, num_sentlvl_labels=num_sentlvl_labels, max_position_embeddings=args.max_position_embeddings, label_smoothing=args.label_smoothing, fp32_embedding=args.fp32_embedding, relax_projection=relax_projection, new_pos_ids=args.new_pos_ids, ffn_type=args.ffn_type, hidden_dropout_prob=args.hidden_dropout_prob, attention_probs_dropout_prob=args.attention_probs_dropout_prob, num_qkv=args.num_qkv, seg_emb=args.seg_emb)
     #1. 模型初始化，入口定义好
     gsm = GSM()
-    ckpt = "/home/yuerxin/Neural_Topic_Models/ckpt/GSM_ggw10k_tp50_ep200.ckpt"
-    gsm_checkpoint=torch.load(ckpt)
+    gsm_checkpoint=torch.load(args.topic_model_recover_path)
     gsm.load_state_dict(gsm_checkpoint["net"])
     
     if args.local_rank == 0:

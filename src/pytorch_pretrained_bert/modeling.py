@@ -340,8 +340,8 @@ class BertSelfAttention(nn.Module):
         topic_context_layer_2 = None
         if (topic_mode == 1 or topic_mode == 1.1) and layer_id == 11 :
             ##topic_attention 1
-            # fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
-            fi = topic_embedding
+            fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
+            # fi = topic_embedding
             fi = self.LayerNorm(fi)
             Q = self.w_q(hidden_states) #[batch,192,768] = [batch,192,768] * [768,768]
             K = self.W_k(fi) #[k,768] = [k,768] * [768,768]

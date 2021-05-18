@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 # GSM model
 class GSM(nn.Module):
-    def __init__(self, encode_dims=[2000,768,50],decode_dims=[50,768,2000],dropout=0.0):
+    def __init__(self, encode_dims=[2000,1024,768,20],decode_dims=[20,768,2000],dropout=0.0):
 
         super(GSM, self).__init__()
         # self.hidden_encoder = nn.Linear(encode_dims[0],encode_dims[1]) #[2000,768]
@@ -24,8 +24,8 @@ class GSM(nn.Module):
             f'enc_{i}':nn.Linear(encode_dims[i],encode_dims[i+1]) 
             for i in range(len(encode_dims)-2)
         })
-        self.fc_mu = nn.Linear(encode_dims[1],encode_dims[2]) #[768,20]
-        self.fc_logvar = nn.Linear(encode_dims[1],encode_dims[2]) #[768,20]
+        self.fc_mu = nn.Linear(encode_dims[-2],encode_dims[-1]) #[768,20]
+        self.fc_logvar = nn.Linear(encode_dims[-2],encode_dims[-1]) #[768,20]
 
         # self.hidden_decoder_1 = nn.Linear(decode_dims[0],decode_dims[1]) #[20,768]
         # self.hidden_decoder_2 = nn.Linear(decode_dims[1],decode_dims[2]) #[768,2000]

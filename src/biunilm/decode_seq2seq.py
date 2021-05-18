@@ -18,6 +18,7 @@ import pickle
 import sys
 sys.path.append("/home/yuerxin/topic_unilm/src/")
 from topic_model.gsm import GSM
+from topic_model.utils import evaluate_topic_quality, smooth_curve,calc_topic_diversity
 from pytorch_pretrained_bert.tokenization import BertTokenizer, WhitespaceTokenizer
 from pytorch_pretrained_bert.modeling import BertForSeq2SeqDecoder
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
@@ -29,11 +30,15 @@ import pickle
 import gensim
 from gensim.corpora import Dictionary
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-                    datefmt='%m/%d/%Y %H:%M:%S',
-                    level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+# logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
+#                     datefmt='%m/%d/%Y %H:%M:%S',
+#                     level=logging.INFO)
+# logger = logging.getLogger(__name__)
+# globa var
+loss_sum = 0.0
+ppx_sum = 0.0
+word_count = 0.0
+doc_count = 0.0
 
 def detokenize(tk_list):
     r_list = []
@@ -44,11 +49,49 @@ def detokenize(tk_list):
             r_list.append(tk)
     return r_list
 
-
 def ascii_print(text):
     text = text.encode("ascii", "ignore")
     print(text)
 
+def show_topic_words(vae,n_topic, device, id2token, topic_id=None,topK=5):
+    topic_words = []
+    idxes = torch.eye(n_topic).to(device) #就是对标准的对角线为1的矩阵，目的是把beta原封不动取出来
+    
+    word_dist = vae.decode(idxes) #[K * V]
+    
+    #word_dist = torch.softmax(word_dist,dim=1)
+    vals,indices = torch.topk(word_dist,topK,dim=1)
+    vals = vals.cpu().tolist()
+    indices = indices.cpu().tolist()
+    if topic_id==None:
+        for i in range(n_topic):
+            topic_words.append([id2token[idx] for idx in indices[i]])
+    else:
+        topic_words.append([id2token[idx] for idx in indices[topic_id]])
+    return topic_words
+
+def cal_ppl(batch_bow, p_x, log_vars, mus):
+    global loss_sum 
+    global ppx_sum 
+    global word_count 
+    global doc_count 
+    # topic_model evaluate
+    logsoftmax = torch.log(p_x + 1e-10) 
+    rec_loss = -1.0 * torch.sum(batch_bow*logsoftmax) #bows*logsoftmax = [batch_size, |V|], 其中torch.sum 把所有的loss全部加起来了，也可以只用加某一维度。               
+    rec_loss_per = -1.0 * torch.sum(batch_bow*logsoftmax, dim=1)
+    rec_loss_per = rec_loss_per.cpu().detach().numpy()
+    kl_div = -0.5 * torch.sum(1+log_vars-mus.pow(2)-log_vars.exp())
+    loss = rec_loss + kl_div 
+    # cal perplexity
+    word_count_list = []
+    loss_sum += loss.item()
+    for bow in batch_bow:
+        word_num = torch.sum(bow).cpu().numpy()
+        word_count_list.append(word_num)
+        word_count += word_num
+    word_count_np = np.array(word_count_list)
+    doc_count += len(batch_bow)
+    ppx_sum += np.sum(np.true_divide(rec_loss_per,word_count_np))
 
 def main():
     parser = argparse.ArgumentParser()
@@ -63,6 +106,8 @@ def main():
                         help="The file of fine-tuned pretraining topic model.")
     parser.add_argument("--topic_data_path", default=None, type=str,
                         help="The file of  topic model data.")
+    parser.add_argument("--topic_num", default=20, type=int,
+                        help="topic_num.")
     parser.add_argument("--data_path", default=None, type=str,
                         help="The file of  topic model data.")
     parser.add_argument("--max_seq_length", default=512, type=int,
@@ -218,12 +263,19 @@ def main():
     # get topic_model bows
     def detokenize(tk_list):
         r_list = []
+        src = " ".join(tk_list)
+        src = src.replace("[UNK]","")
+        tk_list = src.split()
         for tk in tk_list:
             if tk.startswith('##') and len(r_list) > 0:
                 r_list[-1] = r_list[-1] + tk[2:]
             else:
                 r_list.append(tk)
+        src = " ".join(r_list)
+        src = src.replace("UNK","")
+        r_list = src.split()
         return r_list
+
     txtLines = []
     for input_line in input_lines:
         textline = " ".join(detokenize(input_line[1]))
@@ -231,9 +283,11 @@ def main():
     cwd = os.getcwd()
     dictionary = Dictionary.load_from_text(os.path.join(args.data_path,'dict.txt'))
     dictionary.id2token = {v:k for k,v in dictionary.token2id.items()} # because id2token is empty be default, it is a bug.
+    # dictionary.id2token[1999] = "UNK"
     stopwords = set([l.strip('\n').strip() for l in open(os.path.join(cwd,'data/topic_model','stopwords.txt'),'r',encoding='utf-8')])
     topic_tokenizer = seq2seq_loader.JiebaTokenizer(stopwords=stopwords)
     docs = topic_tokenizer.tokenize(txtLines)
+
     # convert to BOW representation
     bows, _docs = [],[]
     vocabsize = len(dictionary)
@@ -245,11 +299,6 @@ def main():
         else:
             bows.append([(1999,1)])
     docs = _docs
-    # gensim.corpora.MmCorpus.serialize(os.path.join(data_dir,'corpus.mm'), bows)
-    # dictionary.save_as_text(os.path.join(data_dir,'dict.txt'))
-    # pickle.dump(self.docs,open(os.path.join(data_dir,'docs.pkl'),'wb'))
-    # topic_model bows end 
-    
     with tqdm(total=total_batch) as pbar:
         while next_i < len(input_lines):
             _chunk = input_lines[next_i:next_i + args.batch_size] #如果超过就到最后一个，这是list[a:b]的特性
@@ -279,7 +328,8 @@ def main():
                 p_x,mus,log_vars,theta,beta,topic_embedding = gsm(batch_bow)  
                 traces = unilm(input_ids, theta,beta, topic_embedding,args.topic_mode,token_type_ids,
                                 position_ids, input_mask, task_idx=task_idx, mask_qkv=mask_qkv)
-                
+                cal_ppl(batch_bow, p_x, log_vars, mus)
+
                 if args.beam_size > 1:
                     traces = {k: v.tolist() for k, v in traces.items()}
                     output_ids = traces['pred_seq']
@@ -297,8 +347,20 @@ def main():
                     output_lines[buf_id[i]] = output_sequence
                     if args.need_score_traces:
                         score_trace_list[buf_id[i]] = {
-                            'scores': traces['scores'][i], 'wids': traces['wids'][i], 'ptrs': traces['ptrs'][i]}
+                            'scores': traces['scores'][i], 'wids': traces['wids'][i], 'ptrs': traces['ptrs'][i]}    
             pbar.update(1)
+    print("word_count", word_count)
+    ppx = np.exp(loss_sum / word_count)
+    ppx_document = np.exp(ppx_sum / doc_count)
+    print("ppx", ppx)
+    print("ppx_document",ppx_document)
+    topic_words = show_topic_words(gsm.module, args.topic_num, device, dictionary.id2token, topic_id=None,topK=5)
+    evaluate_topic_quality(topic_words, docs, dictionary, taskname="unilm", calc4each=False)
+    topic_diversity = calc_topic_diversity(topic_words)
+    print("topic_diversity", topic_diversity)
+    # print('\n'.join([str(lst) for lst in topic_words]))
+    # print('='*30)
+    
     if args.output_file:
         fn_out = args.output_file
     else:
