@@ -147,7 +147,8 @@ class BertTokenizer(object):
             vocab_file = os.path.join(vocab_file, VOCAB_NAME)
         # redirect to the cache, if necessary
         try:
-            resolved_vocab_file = cached_path(vocab_file, cache_dir=cache_dir)
+            #resolved_vocab_file = cached_path(vocab_file, cache_dir=cache_dir) #cache_dir=None  这里下载并返回词表位置，由于网络访问慢，直接给出返回的词表位置，如果改bert模型，需要重新搞。
+            resolved_vocab_file = "/home/yuerxin/topic_unilm/src/pretrain_model/bert-base-cased-cache/5e8a2b4893d13790ed4150ca1906be5f7a03d6c4ddf62296c383f6db42814db2.e13dbb970cb325137104fb2e5f36fe865f27746c6b526f6352861b1980eb80b1"
         except FileNotFoundError:
             logger.error(
                 "Model name '{}' was not found in model name list ({}). "
@@ -159,9 +160,11 @@ class BertTokenizer(object):
             return None
         if resolved_vocab_file == vocab_file:
             logger.info("loading vocabulary file {}".format(vocab_file))
+            # print("yes resolved_vocab_file, vocab_file", resolved_vocab_file,vocab_file)
         else:
             logger.info("loading vocabulary file {} from cache at {}".format(
                 vocab_file, resolved_vocab_file))
+            # print("no resolved_vocab_file, vocab_file", resolved_vocab_file,vocab_file)
         if pretrained_model_name in PRETRAINED_VOCAB_POSITIONAL_EMBEDDINGS_SIZE_MAP:
             # if we're using a pretrained model, ensure the tokenizer wont index sequences longer
             # than the number of positional embeddings

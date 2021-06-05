@@ -78,12 +78,13 @@ def cached_path(url_or_filename: Union[str, Path], cache_dir: Union[str, Path] =
     return the path to the cached file. If it's already a local path,
     make sure the file exists and then return the path.
     """
-    # print("url_or_filename", url_or_filename)
-    # print("cache_dir", cache_dir)
-    # print("Path", Path)
-    if cache_dir is None: #None
-        cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
-    if isinstance(url_or_filename, Path): # https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-vocab.txt
+    # print("url_or_filename", url_or_filename) #url_or_filename=https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-vocab.txt
+    # print("cache_dir", cache_dir) #None
+    # print("Path", Path) Path = #<class 'pathlib.Path'>
+    if cache_dir is None: 
+        cache_dir = PYTORCH_PRETRAINED_BERT_CACHE #cache_dir=/home/yuerxin/topic_unilm/src/pretrain_model/bert-base-cased-cache
+        # print("cache_dir", cache_dir)
+    if isinstance(url_or_filename, Path): 
         url_or_filename = str(url_or_filename)
     if isinstance(cache_dir, Path):
         cache_dir = str(cache_dir)
@@ -170,6 +171,8 @@ def get_from_cache(url: str, cache_dir: Union[str, Path] = None) -> str:
     Given a URL, look for the corresponding dataset in the local cache.
     If it's not there, download it. Then return the path to the cached file.
     """
+    #url = https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-vocab.txt
+    #cache_dir = /home/yuerxin/topic_unilm/src/pretrain_model/bert-base-cased-cache
     if cache_dir is None:
         cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
     if isinstance(cache_dir, Path):
@@ -187,6 +190,8 @@ def get_from_cache(url: str, cache_dir: Union[str, Path] = None) -> str:
                           .format(url, response.status_code))
         etag = response.headers.get("ETag")
     filename = url_to_filename(url, etag)
+    # print("filename",filename)
+
 
     # get cache path to put the file
     cache_path = os.path.join(cache_dir, filename)

@@ -65,6 +65,8 @@ def main():
                         help="The input data file name.")
     parser.add_argument("--topic_model_recover_path", default=None, type=str,
                         help="The file of fine-tuned pretraining topic model.")
+    parser.add_argument("--topic_model_dict_path", default=None, type=str,
+                        help="The file of fine-tuned pretraining topic model.")
     parser.add_argument("--tgt_file", default=None, type=str,
                         help="The output data file name.")
     parser.add_argument("--bert_model", default=None, type=str, required=True,
@@ -93,8 +95,8 @@ def main():
                         help="The file of pretraining optimizer.")
     parser.add_argument('--topic_mode', default=1, type=float,
                         help="1:idea1 1.1:idea1_wo_theta 2:idea2 ")
-    parser.add_argument('--topic_embedding_size', default=768, type=int,
-                        help="opic attenion type")
+    parser.add_argument('--topic_model', default=False, type=bool,
+                        help="if only use topic model")
     # Other parameters
     parser.add_argument("--max_seq_length",
                         default=192,
@@ -226,7 +228,6 @@ def main():
                         help="Using position shift for fine-tuning.")
 
     args = parser.parse_args()
-
     assert Path(args.model_recover_path).exists(
     ), "--model_recover_path doesn't exist"
 
@@ -290,7 +291,7 @@ def main():
         fn_tgt = os.path.join(
             args.data_dir, args.tgt_file if args.tgt_file else 'train.tgt')
         train_dataset = seq2seq_loader.Seq2SeqDataset(
-            fn_src, args.data_dir, fn_tgt, args.train_batch_size, data_tokenizer, args.max_seq_length, file_oracle=file_oracle, bi_uni_pipeline=bi_uni_pipeline)
+            fn_src, fn_tgt, args.data_dir, args.topic_model_dict_path, args.train_batch_size, data_tokenizer, args.max_seq_length, file_oracle=file_oracle, bi_uni_pipeline=bi_uni_pipeline)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_dataset, replacement=False)
             _batch_size = args.train_batch_size
@@ -345,7 +346,7 @@ def main():
         unilm = BertForPreTrainingLossMask.from_pretrained(
             args.bert_model, state_dict=model_recover, num_labels=cls_num_labels, num_rel=0, type_vocab_size=type_vocab_size, config_path=args.config_path, task_idx=3, num_sentlvl_labels=num_sentlvl_labels, max_position_embeddings=args.max_position_embeddings, label_smoothing=args.label_smoothing, fp32_embedding=args.fp32_embedding, relax_projection=relax_projection, new_pos_ids=args.new_pos_ids, ffn_type=args.ffn_type, hidden_dropout_prob=args.hidden_dropout_prob, attention_probs_dropout_prob=args.attention_probs_dropout_prob, num_qkv=args.num_qkv, seg_emb=args.seg_emb)
     #1. 模型初始化，入口定义好
-    gsm = GSM()
+    gsm = GSM(train_dataset.vocabsize)
     gsm_checkpoint=torch.load(args.topic_model_recover_path)
     gsm.load_state_dict(gsm_checkpoint["net"])
     
@@ -373,20 +374,35 @@ def main():
         unilm = DataParallelImbalance(unilm)
         gsm = DataParallelImbalance(gsm)
     # Prepare optimizer
+    total = 0
     param_optimizer = list(unilm.named_parameters())
     param_optimizer_topic = list(gsm.named_parameters())
-    # for name, parameters in param_optimizer_topic:
-    #     print(name, ':', parameters)
-    # exit()
+    for name, parameters in unilm.named_parameters():
+        if "idea" in name:
+            if "11" in name and "idea2" in name:
+                total += np.prod(parameters.size())
+                # print(name, ':', parameters.size())
+        else:
+            total += np.prod(parameters.size())
+            # print(name, ':', parameters.size())
+        
+    print("gsm have {} paramerters in total".format(sum(x.numel() for x in gsm.parameters())))
+    print("Number of parameter: %.6fM" % (total/1e6))
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(
-            nd in n for nd in no_decay)], 'weight_decay': 0.01, 'topic':False},
-        {'params': [p for n, p in param_optimizer if any(
-            nd in n for nd in no_decay)], 'weight_decay': 0.0, 'topic':False},        
-        {'params': [p for n, p in param_optimizer_topic], 'weight_decay': 0.0, 'lr':1e-3, 'topic':True}
-    ]
+    if not args.topic_model:
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in param_optimizer if not any(
+                nd in n for nd in no_decay)], 'weight_decay': 0.01, 'topic':False},
+            {'params': [p for n, p in param_optimizer if any(
+                nd in n for nd in no_decay)], 'weight_decay': 0.0, 'topic':False},        
+            {'params': [p for n, p in param_optimizer_topic], 'weight_decay': 0.0, 'lr':1e-3, 'topic':True}
+        ]
+    else:
+        optimizer_grouped_parameters = [   
+            {'params': [p for n, p in param_optimizer_topic], 'weight_decay': 0.0, 'lr':1e-3, 'topic':True}
+        ]
     #一部分是有weight的，一部分是没有weight_dacay的
+    # print("optimizer_grouped_parameters", optimizer_grouped_parameters)
     if args.fp16:
         try:
             # from apex.optimizers import FP16_Optimizer
@@ -403,20 +419,14 @@ def main():
         if args.loss_scale == 0:
             optimizer = FP16_Optimizer_State(
                 optimizer, dynamic_loss_scale=True)
-            # topic_optimizer = FP16_Optimizer_State(
-            #     topic_optimizer, dynamic_loss_scale=True)
         else:
             optimizer = FP16_Optimizer_State(
                 optimizer, static_loss_scale=args.loss_scale)
-            # topic_optimizer = FP16_Optimizer_State(
-            #     topic_optimizer, static_loss_scale=args.loss_scale)
     else:
         optimizer = BertAdam(optimizer_grouped_parameters,
                              lr=args.learning_rate,
                              warmup=args.warmup_proportion,
                              t_total=t_total)
-        topic_optimizer = torch.optim.Adam(gsm.parameters(),
-                        lr=1e-3)
     if recover_step:
         logger.info("***** Recover optimizer: %d *****", recover_step)
         optim_recover = torch.load(os.path.join(
@@ -466,8 +476,7 @@ def main():
                     input_ids, segment_ids, input_mask, mask_qkv, lm_label_ids, masked_pos, masked_weights, is_next, task_idx, bows= batch
                     oracle_pos, oracle_weights, oracle_labels = None, None, None   
                 p_x,mus,log_vars,theta,beta,topic_embedding = gsm(bows)   
-                topic_model_only = False 
-                if not topic_model_only:
+                if not args.topic_model:
                     loss_tuple = unilm(input_ids, theta, beta, topic_embedding, args.topic_mode, segment_ids, input_mask, lm_label_ids, is_next, masked_pos=masked_pos, masked_weights=masked_weights, task_idx=task_idx, masked_pos_2=oracle_pos, masked_weights_2=oracle_weights, masked_labels_2=oracle_labels, mask_qkv=mask_qkv)
                     masked_lm_loss, next_sentence_loss = loss_tuple
 
@@ -481,10 +490,10 @@ def main():
                 loss_topic = rec_loss + kl_div 
                 if n_gpu > 1:    # mean() to average on multi-gpu.
                     loss_topic = loss_topic.mean()
-                    if not topic_model_only:
+                    if not args.topic_model:
                         masked_lm_loss = masked_lm_loss.mean()
                         next_sentence_loss = next_sentence_loss.mean()
-                if not topic_model_only:
+                if not args.topic_model:
                     loss_unilm = masked_lm_loss + next_sentence_loss
 
                 # cal perplexity
@@ -499,14 +508,13 @@ def main():
                 doc_count += len(bows)
                 ppx_sum += np.sum(np.true_divide(rec_loss_per,word_count_np))
                 topicloss_lst.append(loss_topic.item()/len(bows))
-                if not topic_model_only:
+                if not args.topic_model:
                     unilmloss_lst.append(loss_unilm.item())
                 #topic_loss end
-                # logging for each step (i.e., before normalization by args.gradient_accumulation_steps)
-                if topic_model_only:
-                    loss = loss_topic
-                else:
+                if not args.topic_model:
                     loss = loss_unilm + loss_topic
+                else:
+                    loss = loss_topic
                 # ensure that accumlated gradients are normalized
                 if args.gradient_accumulation_steps > 1: # =1
                     loss = loss / args.gradient_accumulation_steps
@@ -526,20 +534,20 @@ def main():
                         for param_group in optimizer.param_groups:
                             if not param_group['topic']:
                                 param_group['lr'] = lr_this_step
-                    if not topic_model_only:
-                        optimizer.step()
-                        optimizer.zero_grad()
-                    # topic_optimizer.step()
-                    # topic_optimizer.zero_grad()
+                    optimizer.step()
+                    optimizer.zero_grad()
                     global_step += 1
-                iter_bar.set_description('Iter (loss_unilm=%5.3f),Iter (ppl=%5.3f)' % (loss_unilm.item(), np.sum(np.true_divide(rec_loss_per,word_count_np)) ))
+                if not args.topic_model:
+                    iter_bar.set_description('Iter (loss_unilm=%5.3f),Iter (ppl=%5.3f)' % (loss_unilm.item(), np.sum(np.true_divide(rec_loss_per,word_count_np))))
+                else:
+                    iter_bar.set_description('Iter (loss_topic=%5.3f), (ppl=%5.3f)' % (loss_topic.item(), np.sum(np.true_divide(rec_loss_per,word_count_np)) ))
             #Save a trained model
             ppx_word = np.exp(loss_sum / word_count)
             ppx_document = np.exp(ppx_sum / doc_count)
             print("********")
             print("word_count", word_count)
             print("ppx_word", ppx_word)
-            print("ppx_document",ppx_document)            
+            print("ppx_document",ppx_document)       
             if (args.local_rank == -1 or torch.distributed.get_rank() == 0):
                 #save unilm model
                 logger.info(
@@ -549,9 +557,6 @@ def main():
                 output_unilm_model_file = os.path.join(
                     args.output_dir, "unilm.{0}.bin".format(i_epoch))
                 torch.save(unilm_model_to_save.state_dict(), output_unilm_model_file)
-                # output_optim_unilm_file = os.path.join(
-                #     args.output_dir, "optim_unilm_{0}.{1}.bin".format(args.experiment_name,i_epoch))
-                # torch.save(optimizer.state_dict(), output_optim_unilm_file)
                 #save topic model
                 logger.info(
                     "** ** * Saving topic model and optimizer ** ** * ")
@@ -560,9 +565,6 @@ def main():
                 output_topic_model_file = os.path.join(
                     args.output_dir, "topic.{0}.ckpt".format(i_epoch))
                 torch.save(topic_model_to_save.state_dict(), output_topic_model_file)
-                # output_optim_topic_file = os.path.join(
-                #     args.output_dir, "optim_topic_{0}.{1}.bin".format(args.experiment_name,i_epoch))
-                # torch.save(topic_optimizer.state_dict(), output_optim_topic_file)
 
                 logger.info("***** CUDA.empty_cache() *****")
                 torch.cuda.empty_cache()

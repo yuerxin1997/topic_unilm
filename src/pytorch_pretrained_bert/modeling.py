@@ -262,7 +262,6 @@ class BertSelfAttention(nn.Module):
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(
             config.hidden_size / config.num_attention_heads) #64
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-5)
         self.all_head_size = self.num_attention_heads * self.attention_head_size #768
 
         if hasattr(config, 'num_qkv') and (config.num_qkv > 1):
@@ -276,18 +275,21 @@ class BertSelfAttention(nn.Module):
         self.value = nn.Linear(
             config.hidden_size, self.all_head_size*self.num_qkv)
         # idea 1
-        self.W_0 = nn.Linear(2000, config.hidden_size)
-        self.w_q = nn.Linear(config.hidden_size, config.hidden_size)   
-        self.W_k = nn.Linear(config.hidden_size, config.hidden_size)   
-        self.W_v = nn.Linear(config.hidden_size, config.hidden_size)
-
+        self.LayerNorm_idea1 = BertLayerNorm(self.attention_head_size, eps=1e-5)
+        self.W_0_idea1 = nn.Linear(300, 64)
+        self.w_q_idea1 = nn.Linear(config.hidden_size, self.attention_head_size)   
+        self.W_k_idea1 = nn.Linear(self.attention_head_size, self.attention_head_size)   
+        self.W_v_idea1 = nn.Linear(self.attention_head_size, self.attention_head_size)
+        self.transforoutput_size = int(config.hidden_size/config.num_attention_heads) * (config.num_attention_heads+1)
+        self.transforoutput_idea1 = nn.Linear(self.transforoutput_size, config.hidden_size)
         # idea 2
-        self.WQa = nn.Linear(config.hidden_size, config.hidden_size)
-        self.WQc = nn.Linear(config.hidden_size, config.hidden_size)   
-        self.WKa = nn.Linear(config.hidden_size, config.hidden_size)
-        self.WKc = nn.Linear(config.hidden_size, config.hidden_size)   
-        self.WVa = nn.Linear(config.hidden_size, config.hidden_size)
-        self.WVc = nn.Linear(config.hidden_size, config.hidden_size)   
+        self.LayerNorm_idea2 = BertLayerNorm(300, eps=1e-5)
+        self.WQa_idea2 = nn.Linear(300, self.all_head_size)
+        self.WQc_idea2 = nn.Linear(300, self.attention_head_size)   
+        self.WKa_idea2 = nn.Linear(300, self.all_head_size)
+        self.WKc_idea2 = nn.Linear(300, self.attention_head_size)   
+        self.WVa_idea2 = nn.Linear(300, self.all_head_size)
+        self.WVc_idea2 = nn.Linear(300, self.attention_head_size)   
 
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
@@ -335,23 +337,26 @@ class BertSelfAttention(nn.Module):
         #hideen_states = [batch,192,768]
         #theta = [batch,K] topic-document distribution
         #beta = [K,2000] topic-words distribution
-        #topic_embedding = [K, 768]
+        #topic_embedding, fi = [K, 300]
         topic_context_layer = None
         topic_context_layer_2 = None
-        if (topic_mode == 1 or topic_mode == 1.1) and layer_id == 11 :
+        # print("theta", theta, theta.size())
+        # print("beta", beta, beta.size())
+        if (topic_mode == 1 or topic_mode == 1.1) and layer_id == 11:
             ##topic_attention 1
-            fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
-            # fi = topic_embedding
-            fi = self.LayerNorm(fi)
-            Q = self.w_q(hidden_states) #[batch,192,768] = [batch,192,768] * [768,768]
-            K = self.W_k(fi) #[k,768] = [k,768] * [768,768]
-            V = self.W_v(K) #[k,768] = [k,768] * [768,768]
+            # fi = self.W_0(beta) #[K,768] = [K,2000] * [2000,768]
+            fi = self.W_0_idea1(topic_embedding) # [K, 64] = [K,300] * [300, 64]
+            fi = self.LayerNorm_idea1(fi)
+            Q = self.w_q_idea1(hidden_states) #[batch,192,64] = [batch,192,768] * [768,64]
+            K = self.W_k_idea1(fi) #[k,64] = [k,64] * [64,64]
+            V = self.W_v_idea1(fi) #[k,64] = [k,64]* [64,64]
             if topic_mode == 1:
-                K = torch.unsqueeze(K,0) # [1, k, 768]
+                K = torch.unsqueeze(K,0) # [1, k, 64]
                 theta = torch.unsqueeze(theta,1) # [batch,1,k]
-                # print("Q,k,theta",Q.size(),K.size(),theta.size())
                 topic_attention_scores = torch.matmul(
-                    Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2) * theta) #  后面= [batch,768,k] = [1,768,k]*[batch,1,k]  Q*后面=[batch,192,k=[batch,192,768]*[batch,768,k]  
+                    Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2) * theta) 
+                    #  K.transpose(-1, -2) * theta = [batch,64,k] = [1,64,k]*[batch,1,k]  
+                    #  Q*后面=[batch,192,k] = [batch,192,64]*[batch,64,k]  
             else:    
                 topic_attention_scores = torch.matmul(
                       Q / math.sqrt(self.attention_head_size), K.transpose(-1, -2))   # Q = [batch,192,768] * [768,k] = [batch,192,k]    
@@ -360,44 +365,44 @@ class BertSelfAttention(nn.Module):
             topic_context_layer = torch.matmul(topic_attention_probs, V) # [batch,192,768] = [batch,192,k] * [k,768]
         if (topic_mode == 2) and layer_id == 11:
             ##topic_attention 2
-            # print("torch.matmul(theta, topic_embedding)", torch.matmul(theta, topic_embedding).size(),theta.size()[0], topic_embedding.size()[1], topic_embedding.size()[1])
-            WQ_middle = torch.unsqueeze(torch.matmul(theta, topic_embedding), 2).expand(theta.size()[0], topic_embedding.size()[1], topic_embedding.size()[1]) #[batch,E,E]
-            # print("Q_middle", WQ_middle.size(),WQ_middle[0])
-            WQ_head = self.WQa(WQ_middle) #(batch,E,E)
-            WQ = self.WQa(WQ_head) #(batch,E,E)
-            # print("WQ",WQ.size())
-
-            # WK_middle = torch.unsqueeze(torch.matmul(theta, topic_embedding), 2).expand(theta.size()[0], topic_embedding.size()[1], topic_embedding.size()[1]) #[batch,E,E]
-            # print("K_middle", WK_middle.size(),WK_middle[0])
-            WK_head = self.WKa(WQ_middle) #(batch,E,E)
-            WK = self.WKa(WK_head) #(batch,E,E)
-            WV_head = self.WVa(WQ_middle) #(batch,E,E)
-            WV = self.WVa(WV_head) #(batch,E,E)
-            if history_states is None: #都是none
-                topic_mixed_query_layer = torch.matmul(hidden_states,WQ) #mixed_query_layer = [batch,192,768] = [batch,192,768] * [batch,768,768]
+            fi = topic_embedding #[K,E]
+            fi = self.LayerNorm_idea2(fi)
+            # WQ
+            WQ_middle = torch.unsqueeze(torch.matmul(theta, fi), 2).expand(theta.size()[0], fi.size()[1], fi.size()[1]) #[batch,E300,E300]=[batch,k] * [k,E]
+            # print("WQ_middle_before",WQ_middle)
+            WQ_middle = torch.diagonal(WQ_middle, dim1=-2, dim2=-1)
+            # # print("WQ_middle_after",WQ_middle)
+            WQ_middle = torch.diag_embed(WQ_middle, offset=0, dim1=-2, dim2=-1)
+            # print("WQ_middle_after_2",WQ_middle)
+            WQ_head = self.WQa_idea2(WQ_middle) #(batch,dmodel 768,E 300)
+            WQ_head = WQ_head.permute(0, 2, 1).contiguous()
+            WQ = self.WQc_idea2(WQ_head) #(batch,dmodel 768, dk64)
+            # WK
+            WK_head = self.WKa_idea2(WQ_middle) #(batch,,dmodel 768,E 300)
+            WK_head = WK_head.permute(0, 2, 1).contiguous()
+            WK = self.WKc_idea2(WK_head) #(batch,dmodel 768, dk64)
+            # WV
+            WV_head = self.WVa_idea2(WQ_middle) #(batch,,dmodel 768,E 300)
+            WV_head = WV_head.permute(0, 2, 1).contiguous()
+            WV = self.WVc_idea2(WV_head) #(batch,dmodel 768, dk64)
+            if history_states is None: 
+                topic_mixed_query_layer = torch.matmul(hidden_states,WQ) #mixed_query_layer = [batch,192,dk] = [batch,192,768] * [batch,768,dk]
                 topic_mixed_key_layer = torch.matmul(hidden_states,WK)
                 topic_mixed_value_layer = torch.matmul(hidden_states,WV)
             else:
                 x_states = torch.cat((history_states, hidden_states), dim=1)
-                topic_mixed_query_layer = torch.matmul(hidden_states,WQ) #mixed_query_layer = [batch,192,768] = [batch,192,768] * [batch,768,768]
+                topic_mixed_query_layer = torch.matmul(hidden_states,WQ) #mixed_query_layer = [batch,192,dk] = [batch,192,768] * [batch,768,dk]
                 topic_mixed_key_layer = torch.matmul(x_states,WK)
                 topic_mixed_value_layer = torch.matmul(x_states,WV)      
-            topic_query_layer = self.transpose_for_scores(topic_mixed_query_layer, mask_qkv) #[batch,12,192,64] 其中12是attention_head_num, 64是attention_hidden_state
-            topic_key_layer = self.transpose_for_scores(topic_mixed_key_layer, mask_qkv)
-            topic_value_layer = self.transpose_for_scores(topic_mixed_value_layer, mask_qkv)
             topic_attention_scores = torch.matmul(
-                topic_query_layer / math.sqrt(self.attention_head_size), topic_key_layer.transpose(-1, -2)) #[batch,12,192,192] =[batch,12,192,64] * [batch,12,64,192]
-            topic_attention_scores = topic_attention_scores + attention_mask #attention_mask 就是把所有padding的部分变成-10000，有字的地方变成0
+                topic_mixed_query_layer / math.sqrt(self.attention_head_size), topic_mixed_key_layer.transpose(-1, -2)) #[batch,192,192] =[batch,192,dk] * [batch,dk,192]
+            topic_attention_mask = attention_mask.squeeze()
+            topic_attention_scores = topic_attention_scores + topic_attention_mask #attention_mask 就是把所有padding的部分变成-10000，有字的地方变成0
             topic_attention_probs = nn.Softmax(dim=-1)(topic_attention_scores)
             topic_attention_probs = self.dropout(topic_attention_probs)
-            topic_context_layer_2 = torch.matmul(topic_attention_probs, topic_value_layer) # [batch,12,192,64] = [batch,12,192,192] * [batch,12,192,64]
-            topic_context_layer_2 = topic_context_layer_2.permute(0, 2, 1, 3).contiguous()
-            topic_new_context_layer_shape = topic_context_layer_2.size()[
-                :-2] + (self.all_head_size,) #就是看输出要多少size [batch,192,768]
-            topic_context_layer_2 = topic_context_layer_2.view(*topic_new_context_layer_shape) #按size输出        
-        
+            topic_context_layer_2 = torch.matmul(topic_attention_probs, topic_mixed_value_layer) # [batch,192,dk] = [batch,192,192] * [batch,192,dk]
         ##self_attention
-        if history_states is None: #都是none
+        if history_states is None: 
             mixed_query_layer = self.query(hidden_states) #mixed_query_layer = [batch,192,768] = [batch,192,768] * [768,768]
             mixed_key_layer = self.key(hidden_states)
             mixed_value_layer = self.value(hidden_states)
@@ -417,10 +422,27 @@ class BertSelfAttention(nn.Module):
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
         attention_probs = self.dropout(attention_probs)
         context_layer = torch.matmul(attention_probs, value_layer) # [batch,12,192,64] = [batch,12,192,192] * [batch,12,192,64]
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[
-            :-2] + (self.all_head_size,) #就是看输出要多少size [batch,192,768]
-        context_layer = context_layer.view(*new_context_layer_shape) #按size输出
+        ###new add 
+        if (topic_mode == 1 or topic_mode == 1.1) and layer_id == 11:   
+            topic_context_layer = torch.unsqueeze(topic_context_layer, 1) #[batch,1,192,64]
+            context_layer = torch.cat((topic_context_layer, context_layer), 1) #[batch,13,192,64]
+            context_layer = context_layer.permute(0, 2, 1, 3).contiguous() #[batch, 192, 13, 64]
+            context_layer = context_layer.reshape(context_layer.size()[
+                :-2]+(self.transforoutput_size,)) #按size输出
+            context_layer = self.transforoutput_idea1(context_layer)
+        ###end
+        elif topic_mode == 2  and layer_id == 11:   
+            topic_context_layer = torch.unsqueeze(topic_context_layer_2, 1) #[batch,1,192,64]
+            context_layer = torch.cat((topic_context_layer, context_layer), 1) #[batch,13,192,64]
+            context_layer = context_layer.permute(0, 2, 1, 3).contiguous() #[batch, 192, 13, 64]
+            context_layer = context_layer.reshape(context_layer.size()[
+                :-2]+(self.transforoutput_size,)) #按size输出
+            context_layer = self.transforoutput_idea1(context_layer)            
+        else:
+            context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+            new_context_layer_shape = context_layer.size()[
+                :-2] + (self.all_head_size,) #就是看输出要多少size [batch,192,768]
+            context_layer = context_layer.view(*new_context_layer_shape) #按size输出
         return context_layer, topic_context_layer, topic_context_layer_2
 
 
@@ -435,13 +457,14 @@ class BertSelfOutput(nn.Module):
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
 
-        if layer_id==11:
-            if topic_mode == 1 or topic_mode == 1.1:
-                hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output)
-            else:
-                hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output_2)
-        else:
-            hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        # if layer_id==11:
+        #     if topic_mode == 1 or topic_mode == 1.1:
+        #         hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output)
+        #     else:
+        #         hidden_states = self.LayerNorm(hidden_states + input_tensor + self_topic_output_2)
+        # else:
+        #     hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
 
@@ -741,9 +764,10 @@ class PreTrainedBertModel(nn.Module):
             archive_file = pretrained_model_name
         # redirect to the cache, if necessary
         try:
-            resolved_archive_file = cached_path(
-                archive_file, cache_dir=cache_dir) #返回pre_train_bert的路径：/home/hejingbo/unilm/src/pretrain_model/bert-base-cased-cache/a803ce83ca27fecf74c355673c434e51c265fb8a3e0e57ac62a80e38ba98d384.681017f415dfb33ec8d0e04fe51a619f3f01532ecea04edbfd48c5d160550d9c
-            
+            #这里下载并返回词表位置，由于网络访问慢，直接给出返回的bert位置，如果改bert模型，需要重新搞。
+            # resolved_archive_file = cached_path(
+            #     archive_file, cache_dir=cache_dir) #返回pre_train_bert的路径：/home/hejingbo/unilm/src/pretrain_model/bert-base-cased-cache/a803ce83ca27fecf74c355673c434e51c265fb8a3e0e57ac62a80e38ba98d384.681017f415dfb33ec8d0e04fe51a619f3f01532ecea04edbfd48c5d160550d9c
+            resolved_archive_file= "/home/yuerxin/unilm/src/pretrain_model/bert-base-cased-cache/a803ce83ca27fecf74c355673c434e51c265fb8a3e0e57ac62a80e38ba98d384.681017f415dfb33ec8d0e04fe51a619f3f01532ecea04edbfd48c5d160550d9c"
         except FileNotFoundError:
             logger.error(
                 "Model name '{}' was not found in model name list ({}). "

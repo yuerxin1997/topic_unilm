@@ -2,7 +2,8 @@ from random import randint, shuffle, choice
 from random import random as rand
 import math
 import torch
-import jieba
+import spacy
+import multiprocessing
 from typing import List
 import os
 import re
@@ -65,27 +66,21 @@ def truncate_tokens_pair(tokens_a, tokens_b, max_len, max_len_a=0, max_len_b=0, 
             num_truncated[1] += 1
     return num_truncated_a, num_truncated_b
 
-class JiebaTokenizer(object):
+class SpacyTokenizer(object):
     def __init__(self, stopwords=None):
-        self.pat = re.compile(r'[0-9!"#$%&\'()*+,-./:;<=>?@—，。：★、￥…【】（）《》？“”‘’！\[\\\]^_`{|}~\u3000]+')
         self.stopwords = stopwords
-        print("Using Jieba tokenizer")
-        
+        self.nlp = spacy.load("en_core_web_sm", disable=['ner', 'parser'])
+        print("Using SpaCy tokenizer") 
+
     def tokenize(self, lines: List[str]) -> List[List[str]]:
-        docs = []
-        for line in tqdm(lines):
-            tokens = jieba.cut(line,use_paddle=True)
-            tokens = [re.sub(self.pat, r'', t).strip() for t in tokens]
-            tokens = [t for t in tokens if t != '']
-            if self.stopwords is not None:
-                tokens = [t for t in tokens if not (t in self.stopwords)]
-            docs.append(tokens)
+        docs = self.nlp.pipe(lines, batch_size=1000, n_process=multiprocessing.cpu_count())
+        docs = [[token.lemma_ for token in doc if not (token.is_stop or token.is_punct)] for doc in docs]
         return docs
 
 class Seq2SeqDataset(torch.utils.data.Dataset):
     """ Load sentence pair (sequential or random order) from corpus """
 
-    def __init__(self, file_src, data_dir, file_tgt, batch_size, tokenizer, max_len, file_oracle=None, short_sampling_prob=0.1, sent_reverse_order=False, bi_uni_pipeline=[]):
+    def __init__(self, file_src, file_tgt, data_dir, topic_model_dict_path, batch_size, tokenizer, max_len, file_oracle=None, short_sampling_prob=0.1, sent_reverse_order=False, bi_uni_pipeline=[]):
         super().__init__()
         self.tokenizer = tokenizer  # tokenize function
         self.max_len = max_len  # maximum length of tokens
@@ -110,40 +105,34 @@ class Seq2SeqDataset(torch.utils.data.Dataset):
             self.dictionary = Dictionary.load_from_text(os.path.join(data_dir,'dict.txt'))
             self.docs = pickle.load(open(os.path.join(data_dir,'docs.pkl'),'rb'))
             self.dictionary.id2token = {v:k for k,v in self.dictionary.token2id.items()} # because id2token is empty be 
+            self.vocabsize = len(self.dictionary)
         else:
             if stopwords==None:
                 stopwords_file = open(os.path.join(cwd,'data','topic_model','stopwords.txt'), 'r', encoding='utf-8')
                 stopwords = set([l.strip('\n').strip() for l in stopwords_file])
-            jiebatokenizer = JiebaTokenizer(stopwords=stopwords)
-            self.docs = jiebatokenizer.tokenize(self.txtLines)
-            self.dictionary = Dictionary.load_from_text(os.path.join(data_dir,'dict.txt'))
-            # build dictionary
-            # self.vob = [ [line.strip('\n')] for line in open(os.path.join(cwd,'data','topic_model','topic_model_vocab.txt'), 'r', encoding='utf-8')]
-            # self.vob = self.vob[0:-1]
-            # self.dictionary = Dictionary(self.vob)
-            #self.dictionary.filter_n_most_frequent(remove_n=20)
-            # self.dictionary = Dictionary(self.docs)
-            # self.dictionary.filter_extremes(keep_n=2000-1)  # use Dictionary to remove un-relevant tokens
-            # self.dictionary.compactify()
-            # self.dictionary.id2token = {v:k for k,v in self.dictionary.token2id.items()} # because id2token is empty by default, it is a bug.
-            # convert to BOW representation
+            self.tokenizer = SpacyTokenizer(stopwords=stopwords)
+            self.docs = self.tokenizer.tokenize(self.txtLines)
+            print("topic_model_dict_path", topic_model_dict_path)
+            self.dictionary = Dictionary.load_from_text(topic_model_dict_path)
             self.bows, _docs = [],[]
+            self.vocabsize = len(self.dictionary)
+            print("self.vocabsize ", self.vocabsize )
             for doc in self.docs:
                 _bow = self.dictionary.doc2bow(doc)
                 if _bow!=[]:
                     _docs.append(list(doc))
                     self.bows.append(_bow)
                 else:
-                    self.bows.append([(1999,1)])
+                    self.bows.append([(self.vocabsize-1,1)])
             self.docs = _docs
             # serialize the dictionary
             gensim.corpora.MmCorpus.serialize(os.path.join(data_dir,'corpus.mm'), self.bows)
             # self.dictionary.save_as_text(os.path.join(data_dir,'dict.txt'))
             pickle.dump(self.docs,open(os.path.join(data_dir,'docs.pkl'),'wb'))
             print("len(bows)", len(self.bows))
-        self.vocabsize = len(self.dictionary)
-        
-        
+            print("len(self.dictionary)", len(self.dictionary))
+
+
         if file_oracle is None:
             with open(file_src, "r", encoding='utf-8') as f_src, open(file_tgt, "r", encoding='utf-8') as f_tgt:
                 for src, tgt in zip(f_src, f_tgt):

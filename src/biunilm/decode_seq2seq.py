@@ -106,7 +106,7 @@ def main():
                         help="The file of fine-tuned pretraining topic model.")
     parser.add_argument("--topic_data_path", default=None, type=str,
                         help="The file of  topic model data.")
-    parser.add_argument("--topic_num", default=20, type=int,
+    parser.add_argument("--topic_num", default=50, type=int,
                         help="topic_num.")
     parser.add_argument("--data_path", default=None, type=str,
                         help="The file of  topic model data.")
@@ -122,8 +122,8 @@ def main():
                         help="Using segment embedding for self-attention.")
     parser.add_argument('--topic_mode', default=1, type=float,
                         help="1:idea1 1.1:idea1_wo_theta 2:idea2 ")
-    parser.add_argument('--topic_embedding_size', default=768, type=int,
-                        help="opic attenion type")
+    parser.add_argument("--topic_model_dict_path", default=None, type=str,
+                        help="The file of fine-tuned pretraining topic model.")
     # decoding parameters
     parser.add_argument('--fp16', action='store_true',
                         help="Whether to use 16-bit float precision instead of 32-bit")
@@ -224,8 +224,8 @@ def main():
     unilm = BertForSeq2SeqDecoder.from_pretrained(args.bert_model, state_dict=unilm_model_recover, num_labels=cls_num_labels, num_rel=pair_num_relation, type_vocab_size=type_vocab_size, task_idx=3, mask_word_id=mask_word_id, search_beam_size=args.beam_size,
                                                     length_penalty=args.length_penalty, eos_id=eos_word_ids, sos_id=sos_word_id, forbid_duplicate_ngrams=args.forbid_duplicate_ngrams, forbid_ignore_set=forbid_ignore_set, not_predict_set=not_predict_set, ngram_size=args.ngram_size, min_len=args.min_len, mode=args.mode, max_position_embeddings=args.max_seq_length, ffn_type=args.ffn_type, num_qkv=args.num_qkv, seg_emb=args.seg_emb, pos_shift=args.pos_shift)
     topic_model_recover = torch.load(args.topic_model_recover_path)
-    gsm = GSM()
-
+    dictionary = Dictionary.load_from_text(args.topic_model_dict_path)
+    gsm = GSM(len(dictionary))
     gsm.load_state_dict(topic_model_recover)
     del unilm_model_recover
     del topic_model_recover
@@ -281,23 +281,23 @@ def main():
         textline = " ".join(detokenize(input_line[1]))
         txtLines.append(textline) 
     cwd = os.getcwd()
-    dictionary = Dictionary.load_from_text(os.path.join(args.data_path,'dict.txt'))
+    dictionary = Dictionary.load_from_text(args.topic_model_dict_path)
     dictionary.id2token = {v:k for k,v in dictionary.token2id.items()} # because id2token is empty be default, it is a bug.
-    # dictionary.id2token[1999] = "UNK"
     stopwords = set([l.strip('\n').strip() for l in open(os.path.join(cwd,'data/topic_model','stopwords.txt'),'r',encoding='utf-8')])
-    topic_tokenizer = seq2seq_loader.JiebaTokenizer(stopwords=stopwords)
+    topic_tokenizer = seq2seq_loader.SpacyTokenizer(stopwords=stopwords)
     docs = topic_tokenizer.tokenize(txtLines)
 
     # convert to BOW representation
     bows, _docs = [],[]
     vocabsize = len(dictionary)
+    print("vocabsize", vocabsize)
     for doc in docs:
         _bow = dictionary.doc2bow(doc)
         if _bow!=[]:
             _docs.append(list(doc))
             bows.append(_bow)
         else:
-            bows.append([(1999,1)])
+            bows.append([(vocabsize-1,1)])
     docs = _docs
     with tqdm(total=total_batch) as pbar:
         while next_i < len(input_lines):
@@ -354,8 +354,8 @@ def main():
     ppx_document = np.exp(ppx_sum / doc_count)
     print("ppx", ppx)
     print("ppx_document",ppx_document)
-    topic_words = show_topic_words(gsm.module, args.topic_num, device, dictionary.id2token, topic_id=None,topK=5)
-    evaluate_topic_quality(topic_words, docs, dictionary, taskname="unilm", calc4each=False)
+    topic_words = show_topic_words(gsm.module, args.topic_num, device, dictionary.id2token, topic_id=None,topK=10)
+    # evaluate_topic_quality(topic_words, docs, dictionary, taskname="unilm", calc4each=False)
     topic_diversity = calc_topic_diversity(topic_words)
     print("topic_diversity", topic_diversity)
     # print('\n'.join([str(lst) for lst in topic_words]))
